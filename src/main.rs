@@ -1,11 +1,11 @@
 use crate::config::{Config, ConfigShared};
+use crate::docker::DockerSupervisor;
 use actix::prelude::*;
 use anyhow::Result;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod actors;
 mod config;
 mod consul;
 mod docker;
@@ -22,24 +22,10 @@ fn main() -> Result<()> {
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 
-    info!("Starting Emissary Rust implementation...");
+    info!("Starting Emissary...");
 
     let config: ConfigShared = ConfigShared::new(Config::load());
-
     info!("Configuration loaded: {:?}", config);
-
-    // Diagnostic check for Docker socket
-    if config.docker_host.starts_with("unix://") {
-        let path = &config.docker_host[7..];
-        match std::fs::metadata(path) {
-            Ok(_) => {
-                info!("Docker socket exists at {}.", path);
-            }
-            Err(e) => {
-                warn!("Docker socket accessibility check failed for {}: {}", path, e);
-            }
-        }
-    }
 
     let docker_client = match docker::DockerClientBuilder::new()
         .with_host(&config.docker_host)
@@ -52,8 +38,6 @@ fn main() -> Result<()> {
             return Err(e);
         }
     };
-
-    info!("Docker client initialized.");
 
     let consul_client = match consul::ConsulClientBuilder::new()
         .with_address(&config.consul_host)
@@ -68,10 +52,8 @@ fn main() -> Result<()> {
         }
     };
 
-    info!("Consul client initialized.");
-
     System::new().block_on(async {
-        actors::AppSupervisor::new(config, docker_client, consul_client).start();
+        DockerSupervisor::new(config, docker_client, consul_client).start();
 
         tokio::signal::ctrl_c()
             .await

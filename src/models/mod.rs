@@ -1,3 +1,5 @@
-pub mod service;
+mod service;
+mod service_health;
 
-pub use service::{ServiceHealth, ServiceInstance};
+pub use service::*;
+pub use service_health::*;
