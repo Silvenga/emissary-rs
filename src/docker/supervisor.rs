@@ -1,6 +1,8 @@
 use crate::config::ConfigShared;
 use crate::consul::ConsulClient;
-use crate::docker::{ContainerActor, ContainerDie, DockerClient, DockerEvent};
+use crate::docker::{ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient};
+use crate::models::ContainerId;
+use crate::parsing::ServiceLabel;
 use actix::prelude::*;
 use backoff::backoff::Backoff;
 use backoff::exponential::ExponentialBackoff;
@@ -14,7 +16,7 @@ pub struct DockerSupervisor {
     config: ConfigShared,
     docker_client: DockerClient,
     consul_client: ConsulClient,
-    containers: HashMap<String, Addr<ContainerActor>>,
+    containers: HashMap<ContainerId, Addr<ContainerActor>>,
     reconnect_backoff: ExponentialBackoff<backoff::SystemClock>,
 }
 
@@ -86,20 +88,19 @@ impl DockerSupervisor {
         let mut current_ids = HashSet::new();
 
         for container in containers {
-            let id = container.id.unwrap_or_default();
-            if id.is_empty() {
-                continue;
-            }
+            let Ok(id): Result<ContainerId, _> = container.id.unwrap_or_default().try_into() else {
+                return;
+            };
 
             if let Some(labels) = container.labels.as_ref() {
-                let services = crate::parsing::ServiceLabel::from_labels(labels);
+                let services = ServiceLabel::from_labels(labels);
 
                 if !services.is_empty() {
                     current_ids.insert(id.clone());
                     self.containers.entry(id.clone()).or_insert_with(|| {
-                        info!("Discovered new container: {}", id);
+                        info!("Reconciling container {}.", id);
                         ContainerActor::new(
-                            id.clone(),
+                            id,
                             services,
                             self.docker_client.clone(),
                             self.consul_client.clone(),
@@ -113,17 +114,17 @@ impl DockerSupervisor {
         }
 
         // Stop actors for containers that are gone
-        let gone_ids: Vec<String> = self
+        let gone_ids: Vec<_> = self
             .containers
             .keys()
-            .filter(|id| !current_ids.contains(*id))
+            .filter(|id| !current_ids.contains(id))
             .cloned()
             .collect();
 
         for id in gone_ids {
             if let Some(addr) = self.containers.remove(&id) {
                 info!("Container gone: {}, stopping actor.", id);
-                addr.do_send(ContainerDie);
+                addr.do_send(ContainerStop);
             }
         }
     }
@@ -131,30 +132,31 @@ impl DockerSupervisor {
     fn process_event(&mut self, event: EventMessage, _ctx: &mut Context<Self>) {
         let action = event.action.as_deref().unwrap_or_default();
         let actor = event.actor.as_ref();
-        let id = actor.and_then(|a| a.id.as_deref()).unwrap_or_default();
-
-        if id.is_empty() {
+        let Ok(id): Result<ContainerId, _> = actor
+            .and_then(|a| a.id.as_deref())
+            .unwrap_or_default()
+            .try_into()
+        else {
             return;
-        }
+        };
 
-        // Route events to the container actor if it exists
-        if let Some(addr) = self.containers.get(id) {
-            addr.do_send(DockerEvent {
+        if let Some(addr) = self.containers.get(&id) {
+            addr.do_send(ContainerDockerEvent {
                 event: event.clone(),
             });
         }
 
         match action {
             "start" => {
-                if !self.containers.contains_key(id)
+                if !self.containers.contains_key(&id)
                     && let Some(services) = actor
                         .and_then(|a| a.attributes.as_ref())
-                        .map(crate::parsing::ServiceLabel::from_labels)
+                        .map(ServiceLabel::from_labels)
                         .filter(|s| !s.is_empty())
                 {
-                    info!("Discovered new container via event: {}", id);
+                    info!("Container {} {}, registering...", id, action);
                     let actor_addr = ContainerActor::new(
-                        id,
+                        id.clone(),
                         services,
                         self.docker_client.clone(),
                         self.consul_client.clone(),
@@ -162,13 +164,13 @@ impl DockerSupervisor {
                         self.config.consul_start_healthy,
                     )
                     .start();
-                    self.containers.insert(id.to_owned(), actor_addr);
+                    self.containers.insert(id, actor_addr);
                 }
             }
             "die" | "stop" | "destroy" => {
-                if let Some(addr) = self.containers.remove(id) {
-                    info!("Container {} {}, sending die message.", id, action);
-                    addr.do_send(ContainerDie);
+                if let Some(addr) = self.containers.remove(&id) {
+                    info!("Container {} {}, unregistering...", id, action);
+                    addr.do_send(ContainerStop);
                 }
             }
             _ => {}
@@ -180,8 +182,6 @@ impl Actor for DockerSupervisor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        info!("Docker Supervisor started.");
-
         self.subscribe_to_events(ctx);
         self.trigger_poll(ctx);
 

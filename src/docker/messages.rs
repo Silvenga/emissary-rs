@@ -3,10 +3,10 @@ use bollard::models::EventMessage;
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct ContainerDie;
+pub struct ContainerStop;
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct DockerEvent {
+pub struct ContainerDockerEvent {
     pub event: EventMessage,
 }

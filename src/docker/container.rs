@@ -1,6 +1,6 @@
 use crate::consul::{ConsulClient, DeregisterService, ServiceActor, ServiceHealthChanged};
-use crate::docker::{ContainerDie, DockerClient, DockerEvent};
-use crate::models::{ServiceHealth, ServiceInstance};
+use crate::docker::{ContainerDockerEvent, ContainerStop, DockerClient};
+use crate::models::{ContainerId, ServiceHealth, ServiceInstance};
 use crate::parsing::ServiceLabel;
 use actix::prelude::*;
 use bollard::models::ContainerInspectResponse;
@@ -8,7 +8,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 pub struct ContainerActor {
-    container_id: String,
+    container_id: ContainerId,
     services: Vec<ServiceLabel>,
     docker_client: DockerClient,
     consul_client: ConsulClient,
@@ -20,7 +20,7 @@ pub struct ContainerActor {
 
 impl ContainerActor {
     pub fn new(
-        container_id: impl Into<String>,
+        container_id: impl Into<ContainerId>,
         services: Vec<ServiceLabel>,
         docker_client: DockerClient,
         consul_client: ConsulClient,
@@ -64,12 +64,6 @@ impl ContainerActor {
                 if let Some(addr) = &self.service_actors[i] {
                     addr.do_send(ServiceHealthChanged { status });
                 } else {
-                    info!(
-                        "Registering service {} for container {} (port {})",
-                        instance.name,
-                        instance.container_short_id(),
-                        instance.port
-                    );
                     let addr = ServiceActor::new(
                         self.consul_client.clone(),
                         instance,
@@ -121,7 +115,7 @@ impl ContainerActor {
     }
 
     fn stop_actor(&mut self, ctx: &mut Context<Self>) {
-        debug!("Stopping Container Actor for ID: {}", self.container_id);
+        debug!("Unregistering container {}.", self.container_id);
         ctx.stop();
     }
 }
@@ -154,12 +148,12 @@ fn get_host_port(info: &ContainerInspectResponse, label_port: Option<u16>) -> Op
     } else {
         if host_ports.is_empty() {
             warn!(
-                "No host ports found for container {}",
+                "No host ports found for container {}.",
                 info.id.as_deref().unwrap_or_default()
             );
         } else {
             warn!(
-                "Multiple host ports found for container {}, please specify in labels",
+                "Multiple host ports found for container {}, please specify in labels.",
                 info.id.as_deref().unwrap_or_default()
             );
         }
@@ -172,7 +166,7 @@ impl Actor for ContainerActor {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         info!(
-            "Container Actor started for ID: {} ({} services)",
+            "Registered container {} ({} services).",
             self.container_id,
             self.services.len()
         );
@@ -186,26 +180,25 @@ impl Actor for ContainerActor {
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        info!("Container Actor stopped for ID: {}", self.container_id);
         for addr in self.service_actors.iter().flatten() {
             addr.do_send(DeregisterService);
         }
+        info!("Unregistered container {}.", self.container_id);
     }
 }
 
-impl Handler<ContainerDie> for ContainerActor {
+impl Handler<ContainerStop> for ContainerActor {
     type Result = ();
 
-    fn handle(&mut self, _msg: ContainerDie, ctx: &mut Self::Context) -> Self::Result {
-        info!("Container {} received die signal.", self.container_id);
+    fn handle(&mut self, _msg: ContainerStop, ctx: &mut Self::Context) -> Self::Result {
         self.stop_actor(ctx);
     }
 }
 
-impl Handler<DockerEvent> for ContainerActor {
+impl Handler<ContainerDockerEvent> for ContainerActor {
     type Result = ();
 
-    fn handle(&mut self, msg: DockerEvent, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: ContainerDockerEvent, _ctx: &mut Self::Context) -> Self::Result {
         let action = msg.event.action.as_deref().unwrap_or_default();
         debug!("Container {} received event: {}", self.container_id, action);
 
@@ -214,7 +207,6 @@ impl Handler<DockerEvent> for ContainerActor {
             .as_ref()
             .filter(|_| action.starts_with("health_status"))
         {
-            info!("Container {} health update: {}", self.container_id, action);
             let status = ServiceHealth::parse(action);
             for addr in self.service_actors.iter().flatten() {
                 addr.do_send(ServiceHealthChanged { status });

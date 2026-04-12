@@ -38,7 +38,6 @@ impl ServiceActor {
         let config = self.config.clone();
         let service_id = config.id();
         let ttl_interval = self.ttl_interval;
-        let notes = config.status_payload();
 
         self.service_id = Some(service_id.clone());
         let initial_status = if config.status.is_healthy(self.start_healthy) {
@@ -55,8 +54,7 @@ impl ServiceActor {
                     tags: config.tags,
                     port: Some(config.port),
                     check: Some(AgentServiceCheck {
-                        name: "Service Discovery TTL Check".to_owned(),
-                        notes: Some(notes),
+                        name: "Container Health".to_owned(),
                         status: Some(initial_status),
                         ttl: Some(format!("{}s", ttl_interval * 3)),
                         deregister_critical_service_after: Some(format!("{}s", ttl_interval * 6)),
@@ -67,11 +65,17 @@ impl ServiceActor {
                 client.register_service(&payload).await
             }
             .into_actor(self)
-            .map(|res, _act, _ctx| {
+            .map(|res, act, _ctx| {
                 if let Err(ref e) = res {
-                    warn!("Failed to register service in Consul: {}", e);
+                    warn!(
+                        "Failed to register service {} for container {} in Consul: {}.",
+                        act.config.name, act.config.container_id, e
+                    );
                 } else {
-                    info!("Service registered in Consul.");
+                    info!(
+                        "Registered service {} for container {} in Consul.",
+                        act.config.name, act.config.container_id
+                    );
                 }
             }),
         );
@@ -82,7 +86,11 @@ impl Actor for ServiceActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        debug!("Service Actor started for {}.", self.config.id());
+        info!(
+            "Registering service {} for container {} (port {}, tags: {:?}).",
+            self.config.name, self.config.container_id, self.config.port, self.config.tags
+        );
+
         self.register_service(ctx);
 
         ctx.run_interval(Duration::from_secs(self.ttl_interval), |act, ctx| {
@@ -98,17 +106,25 @@ impl Actor for ServiceActor {
                         if status.is_healthy(start_healthy) {
                             client.check_ok(&check_id, Some(payload.as_str())).await
                         } else {
-                            client.check_failure(&check_id, Some(payload.as_str())).await
+                            client
+                                .check_failure(&check_id, Some(payload.as_str()))
+                                .await
                         }
                     }
                     .into_actor(act)
                     .map(|res, act, ctx| {
                         if let Err(e) = res {
                             if matches!(e, ConsulError::NotFound(_)) {
-                                warn!("Service not found in Consul, attempting re-registration.");
+                                warn!(
+                                    "Service {} for container {} not found in Consul, attempting re-registration.",
+                                    act.config.name, act.config.container_id
+                                );
                                 act.register_service(ctx);
                             } else {
-                                warn!("Failed to update Consul TTL check: {}", e);
+                                warn!(
+                                    "Failed to update Consul TTL check for service {} for container {}: {}.",
+                                    act.config.name, act.config.container_id, e
+                                );
                             }
                         }
                     }),
@@ -118,7 +134,10 @@ impl Actor for ServiceActor {
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        debug!("Service Actor stopped.");
+        debug!(
+            "Service {} for container {} stopped.",
+            self.config.name, self.config.container_id
+        );
     }
 }
 
@@ -126,7 +145,12 @@ impl Handler<ServiceHealthChanged> for ServiceActor {
     type Result = anyhow::Result<()>;
 
     fn handle(&mut self, msg: ServiceHealthChanged, ctx: &mut Self::Context) -> Self::Result {
-        debug!("Service health changed to: {:?}", msg.status);
+        if msg.status != self.last_status {
+            info!(
+                "Service {} for container {} health changed from {:?} -> {:?}.",
+                self.config.name, self.config.container_id, self.last_status, msg.status
+            );
+        }
 
         self.last_status = msg.status;
         self.config.status = msg.status;
@@ -143,17 +167,25 @@ impl Handler<ServiceHealthChanged> for ServiceActor {
                     if status.is_healthy(start_healthy) {
                         client.check_ok(&check_id, Some(payload.as_str())).await
                     } else {
-                        client.check_failure(&check_id, Some(payload.as_str())).await
+                        client
+                            .check_failure(&check_id, Some(payload.as_str()))
+                            .await
                     }
                 }
                 .into_actor(self)
                 .map(|res, act, ctx| {
                     if let Err(e) = res {
                         if matches!(e, ConsulError::NotFound(_)) {
-                            warn!("Service not found in Consul, attempting re-registration.");
+                            warn!(
+                                "Service {} for container {} not found in Consul, attempting re-registration.",
+                                act.config.name, act.config.container_id
+                            );
                             act.register_service(ctx);
                         } else {
-                            warn!("Failed to update Consul TTL check: {}", e);
+                            warn!(
+                                "Failed to update Consul TTL check for service {} for container {}: {}.",
+                                act.config.name, act.config.container_id, e
+                            );
                         }
                     }
                 }),
@@ -180,11 +212,17 @@ impl Handler<DeregisterService> for ServiceActor {
                 }
             }
             .into_actor(self)
-            .map(|res, _act, ctx| {
+            .map(|res, act, ctx| {
                 if let Err(ref e) = res {
-                    warn!("Failed to deregister service from Consul: {}", e);
+                    warn!(
+                        "Failed to deregister service {} for container {} from Consul: {}.",
+                        act.config.name, act.config.container_id, e
+                    );
                 } else {
-                    info!("Service deregistered from Consul.");
+                    info!(
+                        "Deregistered service {} for container {} from Consul.",
+                        act.config.name, act.config.container_id
+                    );
                 }
                 ctx.stop();
                 res.map_err(anyhow::Error::from)
