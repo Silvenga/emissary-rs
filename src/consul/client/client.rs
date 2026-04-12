@@ -1,5 +1,5 @@
 use crate::consul::client::errors::{ConsulError, Result};
-use crate::consul::client::types::AgentServiceRegistration;
+use crate::consul::client::types::{AgentCheckUpdate, AgentServiceRegistration, CheckStatus};
 use backoff::exponential::ExponentialBackoff;
 use backoff::future::retry;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
@@ -45,32 +45,35 @@ impl ConsulClient {
     }
 
     /// Updates a TTL check to the passing state.
-    pub async fn check_ok(&self, check_id: impl AsRef<str>, note: Option<&str>) -> Result<()> {
+    pub async fn check_ok(&self, check_id: impl AsRef<str>, output: Option<&str>) -> Result<()> {
         let check_id = check_id.as_ref();
-        self.execute_with_retry(|| async {
-            let url = format!("{}/v1/agent/check/pass/{}", self.inner.address, check_id);
-            let mut request = self.inner.client.put(url);
-
-            if let Some(note) = note {
-                request = request.query(&[("note", note)]);
-            }
-
-            self.send_and_validate(request).await
-        })
-        .await
+        let payload = AgentCheckUpdate {
+            status: CheckStatus::Passing,
+            output: output.unwrap_or_default().to_owned(),
+        };
+        self.update_check(check_id, &payload).await
     }
 
     /// Updates a TTL check to the critical state.
-    pub async fn check_failure(&self, check_id: impl AsRef<str>, note: Option<&str>) -> Result<()> {
+    pub async fn check_failure(&self, check_id: impl AsRef<str>, output: Option<&str>) -> Result<()> {
+        let check_id = check_id.as_ref();
+        let payload = AgentCheckUpdate {
+            status: CheckStatus::Critical,
+            output: output.unwrap_or_default().to_owned(),
+        };
+        self.update_check(check_id, &payload).await
+    }
+
+    /// Updates a TTL check using the update endpoint.
+    pub async fn update_check(
+        &self,
+        check_id: impl AsRef<str>,
+        payload: &AgentCheckUpdate,
+    ) -> Result<()> {
         let check_id = check_id.as_ref();
         self.execute_with_retry(|| async {
-            let url = format!("{}/v1/agent/check/fail/{}", self.inner.address, check_id);
-            let mut request = self.inner.client.put(url);
-
-            if let Some(note) = note {
-                request = request.query(&[("note", note)]);
-            }
-
+            let url = format!("{}/v1/agent/check/update/{}", self.inner.address, check_id);
+            let request = self.inner.client.put(url).json(payload);
             self.send_and_validate(request).await
         })
         .await

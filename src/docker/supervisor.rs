@@ -24,8 +24,10 @@ impl DockerSupervisor {
         docker_client: DockerClient,
         consul_client: ConsulClient,
     ) -> Self {
-        let mut reconnect_backoff = ExponentialBackoff::default();
-        reconnect_backoff.max_elapsed_time = None;
+        let reconnect_backoff = ExponentialBackoff::<backoff::SystemClock> {
+            max_elapsed_time: None,
+            ..Default::default()
+        };
 
         Self {
             config,
@@ -95,7 +97,7 @@ impl DockerSupervisor {
                 if !services.is_empty() {
                     current_ids.insert(id.clone());
                     self.containers.entry(id.clone()).or_insert_with(|| {
-                        info!("Discovered new service container: {}", id);
+                        info!("Discovered new container: {}", id);
                         ContainerActor::new(
                             id.clone(),
                             services,
@@ -150,7 +152,7 @@ impl DockerSupervisor {
                         .map(crate::parsing::ServiceLabel::from_labels)
                         .filter(|s| !s.is_empty())
                 {
-                    info!("Discovered new service container via event: {}", id);
+                    info!("Discovered new container via event: {}", id);
                     let actor_addr = ContainerActor::new(
                         id,
                         services,

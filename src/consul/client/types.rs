@@ -93,3 +93,17 @@ pub struct AgentServiceCheck {
     #[serde(rename = "TCP")]
     pub tcp: Option<String>,
 }
+
+/// Payload struct to update a health check for the local agent.
+///
+/// See https://developer.hashicorp.com/consul/api-docs/agent/check#ttl-check-update for more information.
+#[allow(non_snake_case)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct AgentCheckUpdate {
+    /// Specifies the status of the check. Valid values are "passing", "warning", and "critical".
+    #[serde(rename = "Status")]
+    pub status: CheckStatus,
+    /// Specifies a human-readable message. This will be passed through to the check's Output field.
+    #[serde(rename = "Output")]
+    pub output: String,
+}

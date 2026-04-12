@@ -38,6 +38,7 @@ impl ServiceActor {
         let config = self.config.clone();
         let service_id = config.id();
         let ttl_interval = self.ttl_interval;
+        let notes = config.status_payload();
 
         self.service_id = Some(service_id.clone());
         let initial_status = if config.status.is_healthy(self.start_healthy) {
@@ -55,7 +56,7 @@ impl ServiceActor {
                     port: Some(config.port),
                     check: Some(AgentServiceCheck {
                         name: "Service Discovery TTL Check".to_owned(),
-                        notes: Some("Emissary managed TTL check".to_owned()),
+                        notes: Some(notes),
                         status: Some(initial_status),
                         ttl: Some(format!("{}s", ttl_interval * 3)),
                         deregister_critical_service_after: Some(format!("{}s", ttl_interval * 6)),
@@ -88,17 +89,16 @@ impl Actor for ServiceActor {
             if let Some(ref service_id) = act.service_id {
                 let client = act.client.clone();
                 let check_id = format!("service:{}", service_id);
+                let payload = act.config.status_payload();
                 let status = act.last_status;
                 let start_healthy = act.start_healthy;
 
                 ctx.spawn(
                     async move {
                         if status.is_healthy(start_healthy) {
-                            client.check_ok(&check_id, Some("Container is healthy")).await
+                            client.check_ok(&check_id, Some(payload.as_str())).await
                         } else {
-                            client
-                                .check_failure(&check_id, Some("Container is unhealthy"))
-                                .await
+                            client.check_failure(&check_id, Some(payload.as_str())).await
                         }
                     }
                     .into_actor(act)
@@ -129,21 +129,21 @@ impl Handler<ServiceHealthChanged> for ServiceActor {
         debug!("Service health changed to: {:?}", msg.status);
 
         self.last_status = msg.status;
+        self.config.status = msg.status;
 
         if let Some(ref service_id) = self.service_id {
             let client = self.client.clone();
             let check_id = format!("service:{}", service_id);
+            let payload = self.config.status_payload();
             let status = msg.status;
             let start_healthy = self.start_healthy;
 
             ctx.spawn(
                 async move {
                     if status.is_healthy(start_healthy) {
-                        client.check_ok(&check_id, Some("Container is healthy")).await
+                        client.check_ok(&check_id, Some(payload.as_str())).await
                     } else {
-                        client
-                            .check_failure(&check_id, Some("Container is unhealthy"))
-                            .await
+                        client.check_failure(&check_id, Some(payload.as_str())).await
                     }
                 }
                 .into_actor(self)
