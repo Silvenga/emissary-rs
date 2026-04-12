@@ -17,7 +17,6 @@ services:
           path: ./Cargo.lock
     depends_on:
       - consul
-    user: root
     environment:
       CONSUL_HOST: http://consul:8500
       DOCKER_HOST: unix:///var/run/docker.sock

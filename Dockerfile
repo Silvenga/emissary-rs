@@ -20,9 +20,7 @@ RUN touch src/main.rs \
     && cargo test --release --target x86_64-unknown-linux-musl \
     && cargo build --release --target x86_64-unknown-linux-musl
 
-FROM gcr.io/distroless/static-debian13:nonroot
-
-USER 1000:1000
+FROM gcr.io/distroless/static-debian13:latest
 
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/emissary /emissary
 
