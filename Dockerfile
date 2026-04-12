@@ -14,7 +14,6 @@ RUN mkdir src \
     && rm -rf src
 
 COPY src ./src
-COPY tests ./tests
 
 RUN touch src/main.rs \
     && cargo test --release --target x86_64-unknown-linux-musl \
