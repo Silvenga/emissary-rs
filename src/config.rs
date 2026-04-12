@@ -1,6 +1,9 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use url::Url;
+
+pub type ConfigShared = Arc<Config>;
 
 #[derive(Parser, Deserialize, Serialize, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -14,6 +17,10 @@ pub struct Config {
     )]
     pub docker_host: String,
 
+    /// Timeout for Docker API requests in seconds.
+    #[arg(long, env = "DOCKER_TIMEOUT", default_value = "120")]
+    pub docker_timeout: u64,
+
     /// Consul host address.
     #[arg(
         long,
@@ -23,6 +30,10 @@ pub struct Config {
     )]
     pub consul_host: String,
 
+    /// Timeout for Consul API requests in seconds.
+    #[arg(long, env = "CONSUL_TIMEOUT", default_value = "3")]
+    pub consul_timeout: u64,
+
     /// Consul ACL token.
     #[arg(long, env = "CONSUL_TOKEN")]
     pub consul_token: Option<String>,
@@ -30,6 +41,14 @@ pub struct Config {
     /// Consul datacenter.
     #[arg(long, env = "CONSUL_DATACENTER")]
     pub consul_datacenter: Option<String>,
+
+    /// Consul TTL interval in seconds.
+    #[arg(long, env = "CONSUL_TTL_INTERVAL", default_value = "15")]
+    pub consul_ttl_interval: u64,
+
+    /// Whether a container in 'starting' state should be considered healthy.
+    #[arg(long, env = "CONSUL_START_HEALTHY", default_value = "false")]
+    pub consul_start_healthy: bool,
 
     /// Polling interval in seconds.
     #[arg(long, env = "POLLING_INTERVAL", default_value = "60")]
@@ -47,9 +66,13 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("docker_host", &self.docker_host)
+            .field("docker_timeout", &self.docker_timeout)
             .field("consul_host", &self.consul_host)
+            .field("consul_timeout", &self.consul_timeout)
             .field("consul_token", &self.consul_token.as_ref().map(|_| "***"))
             .field("consul_datacenter", &self.consul_datacenter)
+            .field("consul_ttl_interval", &self.consul_ttl_interval)
+            .field("consul_start_healthy", &self.consul_start_healthy)
             .field("polling_interval", &self.polling_interval)
             .finish()
     }
@@ -59,7 +82,7 @@ fn validate_docker_host(s: &str) -> Result<String, String> {
     let url = Url::parse(s).map_err(|e| format!("Invalid URL: {}. Error: {}", s, e))?;
 
     match url.scheme() {
-        "unix" | "npipe" | "tcp" | "http" | "https" => Ok(s.to_string()),
+        "unix" | "npipe" | "tcp" | "http" | "https" => Ok(s.to_owned()),
         _ => Err(format!(
             "Unsupported DOCKER_HOST scheme: {}. Supported: unix, npipe, tcp, http, https",
             url.scheme()
@@ -71,7 +94,7 @@ fn validate_consul_host(s: &str) -> Result<String, String> {
     let url = Url::parse(s).map_err(|e| format!("Invalid URL: {}. Error: {}", s, e))?;
 
     match url.scheme() {
-        "http" | "https" => Ok(s.to_string()),
+        "http" | "https" => Ok(s.to_owned()),
         _ => Err(format!(
             "Unsupported CONSUL_HOST scheme: {}. Supported: http, https",
             url.scheme()
@@ -86,10 +109,14 @@ mod tests {
     #[test]
     fn when_formatting_config_debug_then_consul_token_should_be_masked() {
         let config = Config {
-            docker_host: "host".to_string(),
-            consul_host: "consul".to_string(),
-            consul_token: Some("secret".to_string()),
+            docker_host: "host".to_owned(),
+            docker_timeout: 120,
+            consul_host: "consul".to_owned(),
+            consul_timeout: 60,
+            consul_token: Some("secret".to_owned()),
             consul_datacenter: None,
+            consul_ttl_interval: 15,
+            consul_start_healthy: false,
             polling_interval: 60,
         };
 
@@ -104,7 +131,11 @@ mod tests {
         let config = Config::try_parse_from(["emissary"]).unwrap();
 
         assert_eq!(config.docker_host, "unix:///var/run/docker.sock");
+        assert_eq!(config.docker_timeout, 120);
         assert_eq!(config.consul_host, "http://localhost:8500");
+        assert_eq!(config.consul_timeout, 3);
+        assert_eq!(config.consul_ttl_interval, 15);
+        assert!(!config.consul_start_healthy);
         assert_eq!(config.polling_interval, 60);
     }
 
@@ -114,12 +145,21 @@ mod tests {
             "emissary",
             "--docker-host",
             "tcp://localhost:2375",
+            "--docker-timeout",
+            "30",
+            "--consul-timeout",
+            "15",
+            "--consul-ttl-interval",
+            "30",
             "--polling-interval",
             "120",
         ])
         .unwrap();
 
         assert_eq!(config.docker_host, "tcp://localhost:2375");
+        assert_eq!(config.docker_timeout, 30);
+        assert_eq!(config.consul_timeout, 15);
+        assert_eq!(config.consul_ttl_interval, 30);
         assert_eq!(config.polling_interval, 120);
     }
 

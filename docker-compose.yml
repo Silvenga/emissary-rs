@@ -1,0 +1,37 @@
+services:
+  consul:
+    image: hashicorp/consul:1.22.6
+    ports:
+      - "8500:8500"
+    command: agent -dev -client=0.0.0.0 -ui
+
+  emissary:
+    build: .
+    develop:
+      watch:
+        - action: rebuild
+          path: ./src
+        - action: rebuild
+          path: ./Cargo.toml
+        - action: rebuild
+          path: ./Cargo.lock
+    depends_on:
+      - consul
+    user: root
+    environment:
+      CONSUL_HOST: http://consul:8500
+      DOCKER_HOST: unix:///var/run/docker.sock
+      RUST_LOG: info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  test-web:
+    image: nginx
+    labels:
+      com.silvenga.emissary.service: web-test;80;tags=demo,nginx
+    healthcheck:
+      test: curl -f http://localhost/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

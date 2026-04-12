@@ -1,0 +1,10 @@
+# Ignore everything
+**
+
+# Allow only relevant files
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!tests/
+!tests/**

@@ -1,30 +1,84 @@
-use crate::config::Config;
-use human_panic::setup_panic;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
+use crate::config::{Config, ConfigShared};
+use actix::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+use tracing::{info, warn};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod actors;
 mod config;
+mod consul;
+mod docker;
+mod models;
+mod parsing;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup human-panic
-    setup_panic!();
+fn main() -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // Setup tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
         .init();
+
+    std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 
     info!("Starting Emissary Rust implementation...");
 
-    // Load configuration
-    let config = Config::load();
+    let config: ConfigShared = ConfigShared::new(Config::load());
 
     info!("Configuration loaded: {:?}", config);
 
-    // TODO: Initialize Actors and Reconciliation Loop
+    // Diagnostic check for Docker socket
+    if config.docker_host.starts_with("unix://") {
+        let path = &config.docker_host[7..];
+        match std::fs::metadata(path) {
+            Ok(_) => {
+                info!("Docker socket exists at {}.", path);
+            }
+            Err(e) => {
+                warn!("Docker socket accessibility check failed for {}: {}", path, e);
+            }
+        }
+    }
+
+    let docker_client = match docker::DockerClientBuilder::new()
+        .with_host(&config.docker_host)
+        .with_timeout(Duration::from_secs(config.docker_timeout))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("Failed to initialize Docker client: {}", e);
+            return Err(e);
+        }
+    };
+
+    info!("Docker client initialized.");
+
+    let consul_client = match consul::ConsulClientBuilder::new()
+        .with_address(&config.consul_host)
+        .with_token(config.consul_token.clone())
+        .with_timeout(Duration::from_secs(config.consul_timeout))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("Failed to initialize Consul client: {}", e);
+            return Err(e);
+        }
+    };
+
+    info!("Consul client initialized.");
+
+    System::new().block_on(async {
+        actors::AppSupervisor::new(config, docker_client, consul_client).start();
+
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ctrl-c");
+        info!("Shutting down...");
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     Ok(())
 }
