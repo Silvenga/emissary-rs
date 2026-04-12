@@ -80,86 +80,13 @@ impl ServiceActor {
             }),
         );
     }
-}
 
-impl Actor for ServiceActor {
-    type Context = Context<Self>;
-
-    fn started(&mut self, ctx: &mut Self::Context) {
-        info!(
-            "Registering service {} for container {} (port {}, tags: {:?}).",
-            self.config.name, self.config.container_id, self.config.port, self.config.tags
-        );
-
-        self.register_service(ctx);
-
-        ctx.run_interval(Duration::from_secs(self.ttl_interval), |act, ctx| {
-            if let Some(ref service_id) = act.service_id {
-                let client = act.client.clone();
-                let check_id = format!("service:{}", service_id);
-                let payload = act.config.status_payload();
-                let status = act.last_status;
-                let start_healthy = act.start_healthy;
-
-                ctx.spawn(
-                    async move {
-                        if status.is_healthy(start_healthy) {
-                            client.check_ok(&check_id, Some(payload.as_str())).await
-                        } else {
-                            client
-                                .check_failure(&check_id, Some(payload.as_str()))
-                                .await
-                        }
-                    }
-                    .into_actor(act)
-                    .map(|res, act, ctx| {
-                        if let Err(e) = res {
-                            if matches!(e, ConsulError::NotFound(_)) {
-                                warn!(
-                                    "Service {} for container {} not found in Consul, attempting re-registration.",
-                                    act.config.name, act.config.container_id
-                                );
-                                act.register_service(ctx);
-                            } else {
-                                warn!(
-                                    "Failed to update Consul TTL check for service {} for container {}: {}.",
-                                    act.config.name, act.config.container_id, e
-                                );
-                            }
-                        }
-                    }),
-                );
-            }
-        });
-    }
-
-    fn stopped(&mut self, _ctx: &mut Self::Context) {
-        debug!(
-            "Service {} for container {} stopped.",
-            self.config.name, self.config.container_id
-        );
-    }
-}
-
-impl Handler<ServiceHealthChanged> for ServiceActor {
-    type Result = anyhow::Result<()>;
-
-    fn handle(&mut self, msg: ServiceHealthChanged, ctx: &mut Self::Context) -> Self::Result {
-        if msg.status != self.last_status {
-            info!(
-                "Service {} for container {} health changed from {:?} -> {:?}.",
-                self.config.name, self.config.container_id, self.last_status, msg.status
-            );
-        }
-
-        self.last_status = msg.status;
-        self.config.status = msg.status;
-
+    fn update_ttl_check(&mut self, ctx: &mut Context<Self>) {
         if let Some(ref service_id) = self.service_id {
             let client = self.client.clone();
             let check_id = format!("service:{}", service_id);
             let payload = self.config.status_payload();
-            let status = msg.status;
+            let status = self.last_status;
             let start_healthy = self.start_healthy;
 
             ctx.spawn(
@@ -191,6 +118,48 @@ impl Handler<ServiceHealthChanged> for ServiceActor {
                 }),
             );
         }
+    }
+}
+
+impl Actor for ServiceActor {
+    type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        info!(
+            "Registering service {} for container {} (port {}, tags: {:?}).",
+            self.config.name, self.config.container_id, self.config.port, self.config.tags
+        );
+
+        self.register_service(ctx);
+
+        ctx.run_interval(Duration::from_secs(self.ttl_interval), |act, ctx| {
+            act.update_ttl_check(ctx);
+        });
+    }
+
+    fn stopped(&mut self, _ctx: &mut Self::Context) {
+        debug!(
+            "Service {} for container {} stopped.",
+            self.config.name, self.config.container_id
+        );
+    }
+}
+
+impl Handler<ServiceHealthChanged> for ServiceActor {
+    type Result = anyhow::Result<()>;
+
+    fn handle(&mut self, msg: ServiceHealthChanged, ctx: &mut Self::Context) -> Self::Result {
+        if msg.status != self.last_status {
+            info!(
+                "Service {} for container {} health changed from {:?} -> {:?}.",
+                self.config.name, self.config.container_id, self.last_status, msg.status
+            );
+        }
+
+        self.last_status = msg.status;
+        self.config.status = msg.status;
+
+        self.update_ttl_check(ctx);
 
         Ok(())
     }
