@@ -1,6 +1,8 @@
 use crate::config::ConfigShared;
 use crate::consul::ConsulClient;
-use crate::docker::{ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient};
+use crate::docker::{
+    ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient, SupervisorShutdown,
+};
 use crate::models::ContainerId;
 use crate::parsing::ServiceLabel;
 use actix::prelude::*;
@@ -185,10 +187,37 @@ impl Actor for DockerSupervisor {
         self.subscribe_to_events(ctx);
         self.trigger_poll(ctx);
 
-        // Anti-entropy poll every 15 minutes
-        ctx.run_interval(Duration::from_secs(15 * 60), |act, ctx| {
-            act.trigger_poll(ctx);
-        });
+        // Anti-entropy poll
+        ctx.run_interval(
+            Duration::from_secs(self.config.polling_interval),
+            |act, ctx| {
+                act.trigger_poll(ctx);
+            },
+        );
+    }
+}
+
+impl Handler<SupervisorShutdown> for DockerSupervisor {
+    type Result = ResponseActFuture<Self, ()>;
+
+    fn handle(&mut self, _msg: SupervisorShutdown, _ctx: &mut Self::Context) -> Self::Result {
+        info!("Shutting down Docker Supervisor...");
+        let futures: Vec<_> = self
+            .containers
+            .drain()
+            .map(|(_, addr)| addr.send(ContainerStop))
+            .collect();
+
+        Box::pin(
+            async move {
+                futures_util::future::join_all(futures).await;
+            }
+            .into_actor(self)
+            .map(|_, _, ctx| {
+                info!("Docker Supervisor shutdown complete.");
+                ctx.stop();
+            }),
+        )
     }
 }
 

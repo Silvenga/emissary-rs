@@ -1,9 +1,9 @@
 use crate::config::{Config, ConfigShared};
-use crate::docker::DockerSupervisor;
+use crate::docker::{DockerSupervisor, SupervisorShutdown};
 use actix::prelude::*;
 use anyhow::Result;
 use std::time::Duration;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     {
         Ok(client) => client,
         Err(e) => {
-            tracing::error!("Failed to initialize Docker client: {}", e);
+            error!("Failed to initialize Docker client: {}", e);
             return Err(e);
         }
     };
@@ -47,18 +47,24 @@ fn main() -> Result<()> {
     {
         Ok(client) => client,
         Err(e) => {
-            tracing::error!("Failed to initialize Consul client: {}", e);
+            error!("Failed to initialize Consul client: {}", e);
             return Err(e);
         }
     };
 
     System::new().block_on(async {
-        DockerSupervisor::new(config, docker_client, consul_client).start();
+        let supervisor = DockerSupervisor::new(config, docker_client, consul_client).start();
 
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for ctrl-c");
-        info!("Shutting down...");
+        info!("Shutdown signal received...");
+
+        if let Err(e) = supervisor.send(SupervisorShutdown).await {
+            error!("Failed to send shutdown signal to supervisor: {}", e);
+        }
+
+        info!("Emissary shutdown complete.");
         Ok::<(), anyhow::Error>(())
     })?;
 

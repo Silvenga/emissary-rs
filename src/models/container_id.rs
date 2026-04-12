@@ -11,7 +11,11 @@ impl ContainerId {
     }
 
     pub fn short_id(&self) -> &str {
-        &self.0[..12]
+        if self.0.len() >= 12 {
+            &self.0[..12]
+        } else {
+            &self.0
+        }
     }
 
     pub fn long_id(&self) -> &str {

@@ -94,7 +94,7 @@ impl ContainerActor {
                             "Container {} not found (404), stopping actor.",
                             act.container_id
                         );
-                        act.stop_actor(ctx);
+                        ctx.notify(ContainerStop);
                     }
                     Err(e) => warn!("Failed to inspect container {}: {}", act.container_id, e),
                 }),
@@ -114,10 +114,6 @@ impl ContainerActor {
         self.last_info = Some(info);
     }
 
-    fn stop_actor(&mut self, ctx: &mut Context<Self>) {
-        debug!("Unregistering container {}.", self.container_id);
-        ctx.stop();
-    }
 }
 
 fn get_host_port(info: &ContainerInspectResponse, label_port: Option<u16>) -> Option<u16> {
@@ -180,18 +176,31 @@ impl Actor for ContainerActor {
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        for addr in self.service_actors.iter().flatten() {
-            addr.do_send(DeregisterService);
-        }
         info!("Unregistered container {}.", self.container_id);
     }
 }
 
 impl Handler<ContainerStop> for ContainerActor {
-    type Result = ();
+    type Result = ResponseActFuture<Self, ()>;
 
-    fn handle(&mut self, _msg: ContainerStop, ctx: &mut Self::Context) -> Self::Result {
-        self.stop_actor(ctx);
+    fn handle(&mut self, _msg: ContainerStop, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("Stopping container actor {}...", self.container_id);
+        let futures: Vec<_> = self
+            .service_actors
+            .iter()
+            .flatten()
+            .map(|addr| addr.send(DeregisterService))
+            .collect();
+
+        Box::pin(
+            async move {
+                futures_util::future::join_all(futures).await;
+            }
+            .into_actor(self)
+            .map(|_, _, ctx| {
+                ctx.stop();
+            }),
+        )
     }
 }
 
