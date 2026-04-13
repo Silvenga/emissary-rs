@@ -1,9 +1,10 @@
 # Emissary
 
 Emissary bridges the gap between Docker and Consul by automatically registering and deregistering services based on
-container lifecycle events. Written in Rust, Emissary is designed to be highly performant and resilient.
+container lifecycle events. Written in Rust, Emissary is designed to be highly performant, running with less than 7MiB
+of memory.
 
-A Rust rewrite of my [Emissary](https://github.com/silvenga/emissary) project.
+A Rust rewrite of my [Emissary](https://github.com/silvenga/emissary) project with better handling of network outages.
 
 ## Features
 
@@ -16,15 +17,22 @@ A Rust rewrite of my [Emissary](https://github.com/silvenga/emissary) project.
 
 ## Usage
 
-Emissary is shipped as a docker container:
+Emissary is shipped as a docker container using semantic versioning, with the lastest stable version using the `latest`
+tag.
 
-```
+```bash
 docker run \
     --restart always \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --net host \
     ghcr.io/silvenga/emissary-rs:latest
 ```
+
+> The network should be `host` to allow Emissary to access the local Consul agent. This is not required if the Consul
+> agent is running as a container or on another host.
+>
+> By default, the container will run with the `root` user as is required to connect to the local Docker daemon socket.
+> If you want to run the container as a non-root user you will need to configure permissions accordingly.
 
 Configure using environment variables or command line flags:
 
@@ -55,6 +63,30 @@ Options:
   -V, --version
           Print version
 ```
+
+Labels are used to configure services on each container, for example, using Docker Compose:
+
+```yaml
+services:
+  nginx:
+    image: nginx
+    expose:
+      - 80
+    labels:
+      com.silvenga.emissary.service-1: web;80;tags=demo,nginx
+      com.silvenga.emissary.service-2: another;80;tags=demo,nginx
+```
+
+Multiple services can be defined on the same container by using different label keys. The formal definition is:
+
+```
+com.silvenga.emissary.service[-1..n] = <service name>[;service port][;tags=tag1,tag2]
+```
+
+The service port is optional for containers that only expose a single port (required for containers that expose multiple
+ports or expose no ports at all).
+
+Zero or more tags can be specified for each service, which will be registered with Consul.
 
 ## Architecture
 
