@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1.51.1", features = ["full"] }
+tokio = { version = "1.52.1", features = ["full"] }
 bollard = "0.20.2"
 strum = { version = "0.28", features = ["derive"] }
 tracing = "0.1.44"
