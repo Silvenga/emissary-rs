@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1.52.1", features = ["full"] }
-bollard = "0.20.2"
+bollard = "0.21.0"
 strum = { version = "0.28", features = ["derive"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
