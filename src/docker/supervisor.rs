@@ -6,6 +6,7 @@ use crate::docker::{
 };
 use crate::models::ContainerId;
 use crate::parsing::ServiceLabel;
+use actix::fut::{ActorFutureExt, ActorStreamExt, WrapFuture, WrapStream};
 use actix::prelude::*;
 use backoff::backoff::Backoff;
 use backoff::exponential::ExponentialBackoff;
@@ -98,26 +99,48 @@ impl DockerSupervisor {
     fn subscribe_to_events(&self, ctx: &mut Context<Self>) {
         debug!("Subscribing to Docker events...");
 
-        let mut filters = HashMap::new();
-        filters.insert("type".to_owned(), vec!["container".to_owned()]);
-        filters.insert(
-            "event".to_owned(),
-            vec![
-                "start".to_owned(),
-                "die".to_owned(),
-                "stop".to_owned(),
-                "destroy".to_owned(),
-                "health_status".to_owned(),
-            ],
-        );
-
+        let filters = build_event_filters();
         let stream = self.docker_client.events(Some(EventsOptions {
             since: None,
             until: None,
             filters: Some(filters),
         }));
 
-        ctx.add_stream(stream);
+        ctx.spawn(
+            stream
+                .into_actor(self)
+                .fold((), |_, item, act, ctx| {
+                    match item {
+                        Ok(event) => {
+                            act.reconnect_backoff.reset();
+                            act.process_event(event, ctx);
+                        }
+                        Err(e) => {
+                            warn!("Docker event stream error: {}. Triggering poll...", e);
+                            act.trigger_poll(ctx);
+                        }
+                    }
+                    async {}.into_actor(act)
+                })
+                .map(|_, act, ctx| {
+                    act.schedule_reconnect(ctx);
+                }),
+        );
+    }
+
+    fn schedule_reconnect(&mut self, ctx: &mut Context<Self>) {
+        self.trigger_poll(ctx);
+
+        let delay = self
+            .reconnect_backoff
+            .next_backoff()
+            .unwrap_or(Duration::from_secs(60));
+
+        warn!("Docker event stream ended. Reconnecting in {:?}...", delay);
+
+        ctx.run_later(delay, |act, ctx| {
+            act.subscribe_to_events(ctx);
+        });
     }
 
     fn trigger_poll(&mut self, ctx: &mut Context<Self>) {
@@ -272,33 +295,20 @@ impl Handler<SupervisorShutdown> for DockerSupervisor {
     }
 }
 
-impl StreamHandler<Result<EventMessage, bollard::errors::Error>> for DockerSupervisor {
-    fn handle(
-        &mut self,
-        item: Result<EventMessage, bollard::errors::Error>,
-        ctx: &mut Self::Context,
-    ) {
-        match item {
-            Ok(event) => {
-                self.reconnect_backoff.reset();
-                self.process_event(event, ctx);
-            }
-            Err(e) => {
-                warn!(
-                    "Docker event stream error: {}. Triggering poll and attempting reconnection...",
-                    e
-                );
-                self.trigger_poll(ctx);
-                self.subscribe_to_events(ctx);
-            }
-        }
-    }
-
-    fn finished(&mut self, ctx: &mut Context<Self>) {
-        warn!("Docker event stream finished. Triggering poll and attempting reconnection...");
-        self.trigger_poll(ctx);
-        self.subscribe_to_events(ctx);
-    }
+fn build_event_filters() -> HashMap<String, Vec<String>> {
+    let mut filters = HashMap::new();
+    filters.insert("type".to_owned(), vec!["container".to_owned()]);
+    filters.insert(
+        "event".to_owned(),
+        vec![
+            "start".to_owned(),
+            "die".to_owned(),
+            "stop".to_owned(),
+            "destroy".to_owned(),
+            "health_status".to_owned(),
+        ],
+    );
+    filters
 }
 
 #[cfg(test)]
