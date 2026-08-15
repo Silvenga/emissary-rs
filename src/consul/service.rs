@@ -48,13 +48,13 @@ impl ServiceActor {
     }
 
     fn register_service(&mut self, ctx: &mut Context<Self>) {
+        self.config.status = self.last_status;
         let client = self.client.clone();
         let config = self.config.clone();
         let service_id = config.id();
         let ttl_interval = self.ttl_interval;
 
         self.service_id = Some(service_id.clone());
-        self.config.status = self.last_status;
         let initial_status = self.initial_check_status();
 
         ctx.spawn(
