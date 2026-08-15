@@ -33,12 +33,6 @@ impl ServiceActor {
         }
     }
 
-    /// Computes the initial Consul check status from the actor's current health.
-    ///
-    /// Re-registration (triggered by a TTL `NotFound`) must use `last_status` rather than
-    /// `config.status` so the check is planted at the latest known health, not a value
-    /// that may have drifted if `ServiceHealthChanged` updated `last_status` without a
-    /// matching `config.status` write.
     fn initial_check_status(&self) -> CheckStatus {
         if self.last_status.is_healthy(self.start_healthy) {
             CheckStatus::Passing

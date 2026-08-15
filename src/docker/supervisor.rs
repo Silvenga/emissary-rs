@@ -157,9 +157,6 @@ impl DockerSupervisor {
         );
     }
 
-    /// Removes a container from the tracked map only if its actor is no longer connected.
-    /// Returns `true` if an entry was removed, `false` if it was already gone or a fresh
-    /// actor has taken its place.
     fn remove_stale_container(&mut self, id: &ContainerId) -> bool {
         let stale = self
             .containers
@@ -342,6 +339,10 @@ fn build_event_filters() -> HashMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::consul::ConsulClientBuilder;
+    use crate::docker::{ContainerActor, DockerClientBuilder};
+    use std::sync::Arc;
 
     fn labels_with_service(name: &str, port: &str) -> HashMap<String, String> {
         let mut labels = HashMap::new();
@@ -492,11 +493,6 @@ mod tests {
     }
 
     fn make_supervisor() -> DockerSupervisor {
-        use crate::config::Config;
-        use crate::consul::ConsulClientBuilder;
-        use crate::docker::DockerClientBuilder;
-        use std::sync::Arc;
-
         let config = Arc::new(Config {
             docker_host: "http://localhost:2375".to_owned(),
             docker_timeout: 120,
@@ -543,9 +539,6 @@ mod tests {
 
     #[test]
     fn when_removing_stale_container_with_dead_actor_then_should_return_true_and_remove() {
-        use crate::consul::ConsulClientBuilder;
-        use crate::docker::{ContainerActor, DockerClientBuilder};
-
         actix::System::new().block_on(async {
             let docker_client = DockerClientBuilder::new()
                 .with_host("http://localhost:2375")
@@ -572,9 +565,6 @@ mod tests {
 
     #[test]
     fn when_removing_stale_container_with_live_actor_then_should_return_false_and_keep() {
-        use crate::consul::ConsulClientBuilder;
-        use crate::docker::{ContainerActor, DockerClientBuilder};
-
         actix::System::new().block_on(async {
             let docker_client = DockerClientBuilder::new()
                 .with_host("http://localhost:2375")
