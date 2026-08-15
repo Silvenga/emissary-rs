@@ -23,6 +23,4 @@ FROM gcr.io/distroless/static-debian13:latest
 
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/emissary /emissary
 
-STOPSIGNAL SIGINT
-
 ENTRYPOINT ["/emissary"]

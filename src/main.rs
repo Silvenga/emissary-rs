@@ -55,10 +55,25 @@ fn main() -> Result<()> {
     System::new().block_on(async {
         let supervisor = DockerSupervisor::new(config, docker_client, consul_client).start();
 
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl-c");
-        info!("Shutdown signal received...");
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => info!("Received SIGTERM, shutting down..."),
+                _ = sigint.recv() => info!("Received SIGINT (Ctrl+C), shutting down..."),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for ctrl-c");
+            info!("Shutdown signal received...");
+        }
 
         if let Err(e) = supervisor.send(SupervisorShutdown).await {
             error!("Failed to send shutdown signal to supervisor: {}", e);
