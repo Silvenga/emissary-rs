@@ -33,6 +33,20 @@ impl ServiceActor {
         }
     }
 
+    /// Computes the initial Consul check status from the actor's current health.
+    ///
+    /// Re-registration (triggered by a TTL `NotFound`) must use `last_status` rather than
+    /// `config.status` so the check is planted at the latest known health, not a value
+    /// that may have drifted if `ServiceHealthChanged` updated `last_status` without a
+    /// matching `config.status` write.
+    fn initial_check_status(&self) -> CheckStatus {
+        if self.last_status.is_healthy(self.start_healthy) {
+            CheckStatus::Passing
+        } else {
+            CheckStatus::Critical
+        }
+    }
+
     fn register_service(&mut self, ctx: &mut Context<Self>) {
         let client = self.client.clone();
         let config = self.config.clone();
@@ -40,11 +54,8 @@ impl ServiceActor {
         let ttl_interval = self.ttl_interval;
 
         self.service_id = Some(service_id.clone());
-        let initial_status = if config.status.is_healthy(self.start_healthy) {
-            CheckStatus::Passing
-        } else {
-            CheckStatus::Critical
-        };
+        self.config.status = self.last_status;
+        let initial_status = self.initial_check_status();
 
         ctx.spawn(
             async move {
@@ -197,5 +208,93 @@ impl Handler<DeregisterService> for ServiceActor {
                 res.map_err(anyhow::Error::from)
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consul::ConsulClientBuilder;
+    use crate::models::ContainerId;
+
+    fn make_client() -> ConsulClient {
+        ConsulClientBuilder::new()
+            .with_address("http://localhost:8500")
+            .build()
+            .unwrap()
+    }
+
+    fn make_instance(status: ServiceHealth) -> ServiceInstance {
+        ServiceInstance {
+            name: "web".to_owned(),
+            container_id: ContainerId::try_from("abc123def456").unwrap(),
+            port: 80,
+            tags: vec![],
+            image: "nginx".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            status,
+        }
+    }
+
+    #[test]
+    fn when_initial_status_healthy_then_check_status_should_be_passing() {
+        let actor = ServiceActor::new(
+            make_client(),
+            make_instance(ServiceHealth::Healthy),
+            15,
+            false,
+        );
+
+        assert_eq!(actor.initial_check_status(), CheckStatus::Passing);
+    }
+
+    #[test]
+    fn when_initial_status_unhealthy_then_check_status_should_be_critical() {
+        let actor = ServiceActor::new(
+            make_client(),
+            make_instance(ServiceHealth::Unhealthy),
+            15,
+            false,
+        );
+
+        assert_eq!(actor.initial_check_status(), CheckStatus::Critical);
+    }
+
+    #[test]
+    fn when_initial_status_starting_and_start_healthy_false_then_check_status_should_be_critical() {
+        let actor = ServiceActor::new(
+            make_client(),
+            make_instance(ServiceHealth::Starting),
+            15,
+            false,
+        );
+
+        assert_eq!(actor.initial_check_status(), CheckStatus::Critical);
+    }
+
+    #[test]
+    fn when_initial_status_starting_and_start_healthy_true_then_check_status_should_be_passing() {
+        let actor = ServiceActor::new(
+            make_client(),
+            make_instance(ServiceHealth::Starting),
+            15,
+            true,
+        );
+
+        assert_eq!(actor.initial_check_status(), CheckStatus::Passing);
+    }
+
+    #[test]
+    fn when_last_status_differs_from_config_status_then_initial_check_should_use_last_status() {
+        let mut actor = ServiceActor::new(
+            make_client(),
+            make_instance(ServiceHealth::Unhealthy),
+            15,
+            false,
+        );
+
+        actor.last_status = ServiceHealth::Healthy;
+
+        assert_eq!(actor.initial_check_status(), CheckStatus::Passing);
     }
 }
