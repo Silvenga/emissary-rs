@@ -1,10 +1,9 @@
 use crate::consul::{ConsulClient, DeregisterService, ServiceActor, ServiceHealthChanged};
-use crate::docker::{ContainerDockerEvent, ContainerStop, DockerClient};
+use crate::docker::{ContainerDockerEvent, ContainerStop, DockerClient, ReconcileContainer};
 use crate::models::{ContainerId, ServiceHealth, ServiceInstance};
 use crate::parsing::ServiceLabel;
 use actix::prelude::*;
 use bollard::models::ContainerInspectResponse;
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 pub struct ContainerActor {
@@ -113,7 +112,6 @@ impl ContainerActor {
         self.notify_consul(status, &info);
         self.last_info = Some(info);
     }
-
 }
 
 fn get_host_port(info: &ContainerInspectResponse, label_port: Option<u16>) -> Option<u16> {
@@ -157,6 +155,28 @@ fn get_host_port(info: &ContainerInspectResponse, label_port: Option<u16>) -> Op
     }
 }
 
+/// The action a [`ContainerActor`] should take in response to a Docker event.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DockerEventAction {
+    /// Re-inspect the container (e.g. a `start` event - only an inspection reveals the full status).
+    Reinspect,
+    /// Update service health from the event's health-status string.
+    UpdateHealth(ServiceHealth),
+    /// No action needed - lifecycle teardown is handled by the supervisor.
+    Ignore,
+}
+
+/// Routes a Docker event action string to a [`DockerEventAction`].
+pub fn resolve_event_action(action: &str) -> DockerEventAction {
+    if action == "start" {
+        DockerEventAction::Reinspect
+    } else if action.starts_with("health_status") {
+        DockerEventAction::UpdateHealth(ServiceHealth::parse(action))
+    } else {
+        DockerEventAction::Ignore
+    }
+}
+
 impl Actor for ContainerActor {
     type Context = Context<Self>;
 
@@ -168,11 +188,6 @@ impl Actor for ContainerActor {
         );
 
         self.trigger_inspection(ctx);
-
-        // Poll for health updates every 5 minutes to catch missed events
-        ctx.run_interval(Duration::from_secs(5 * 60), |act, ctx| {
-            act.trigger_inspection(ctx);
-        });
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
@@ -207,19 +222,94 @@ impl Handler<ContainerStop> for ContainerActor {
 impl Handler<ContainerDockerEvent> for ContainerActor {
     type Result = ();
 
-    fn handle(&mut self, msg: ContainerDockerEvent, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: ContainerDockerEvent, ctx: &mut Self::Context) -> Self::Result {
         let action = msg.event.action.as_deref().unwrap_or_default();
         debug!("Container {} received event: {}", self.container_id, action);
 
-        if let Some(_info) = self
-            .last_info
-            .as_ref()
-            .filter(|_| action.starts_with("health_status"))
-        {
-            let status = ServiceHealth::parse(action);
-            for addr in self.service_actors.iter().flatten() {
-                addr.do_send(ServiceHealthChanged { status });
+        match resolve_event_action(action) {
+            DockerEventAction::Reinspect => {
+                self.trigger_inspection(ctx);
             }
+            DockerEventAction::UpdateHealth(status) => {
+                for addr in self.service_actors.iter().flatten() {
+                    addr.do_send(ServiceHealthChanged { status });
+                }
+            }
+            DockerEventAction::Ignore => {}
         }
+    }
+}
+
+impl Handler<ReconcileContainer> for ContainerActor {
+    type Result = ();
+
+    fn handle(&mut self, _msg: ReconcileContainer, ctx: &mut Self::Context) -> Self::Result {
+        debug!(
+            "Reconciling container {} via anti-entropy poll.",
+            self.container_id
+        );
+        self.trigger_inspection(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn when_event_action_is_start_then_action_should_be_reinspect() {
+        assert_eq!(resolve_event_action("start"), DockerEventAction::Reinspect);
+    }
+
+    #[test]
+    fn when_event_action_is_health_status_healthy_then_action_should_be_update_healthy() {
+        assert_eq!(
+            resolve_event_action("health_status: healthy"),
+            DockerEventAction::UpdateHealth(ServiceHealth::Healthy)
+        );
+    }
+
+    #[test]
+    fn when_event_action_is_health_status_unhealthy_then_action_should_be_update_unhealthy() {
+        assert_eq!(
+            resolve_event_action("health_status: unhealthy"),
+            DockerEventAction::UpdateHealth(ServiceHealth::Unhealthy)
+        );
+    }
+
+    #[test]
+    fn when_event_action_is_health_status_starting_then_action_should_be_update_starting() {
+        assert_eq!(
+            resolve_event_action("health_status: starting"),
+            DockerEventAction::UpdateHealth(ServiceHealth::Starting)
+        );
+    }
+
+    #[test]
+    fn when_event_action_is_die_then_action_should_be_ignore() {
+        assert_eq!(resolve_event_action("die"), DockerEventAction::Ignore);
+    }
+
+    #[test]
+    fn when_event_action_is_stop_then_action_should_be_ignore() {
+        assert_eq!(resolve_event_action("stop"), DockerEventAction::Ignore);
+    }
+
+    #[test]
+    fn when_event_action_is_destroy_then_action_should_be_ignore() {
+        assert_eq!(resolve_event_action("destroy"), DockerEventAction::Ignore);
+    }
+
+    #[test]
+    fn when_event_action_is_unknown_then_action_should_be_ignore() {
+        assert_eq!(
+            resolve_event_action("something_new"),
+            DockerEventAction::Ignore
+        );
+    }
+
+    #[test]
+    fn when_event_action_is_empty_then_action_should_be_ignore() {
+        assert_eq!(resolve_event_action(""), DockerEventAction::Ignore);
     }
 }
