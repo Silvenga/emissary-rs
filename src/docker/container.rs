@@ -1,5 +1,7 @@
 use crate::consul::{ConsulClient, DeregisterService, ServiceActor, ServiceHealthChanged};
-use crate::docker::{ContainerDockerEvent, ContainerStop, DockerClient, ReconcileContainer};
+use crate::docker::{
+    ContainerDockerEvent, ContainerStop, ContainerStopped, DockerClient, ReconcileContainer,
+};
 use crate::models::{ContainerId, ServiceHealth, ServiceInstance};
 use crate::parsing::ServiceLabel;
 use actix::prelude::*;
@@ -15,6 +17,7 @@ pub struct ContainerActor {
     start_healthy: bool,
     last_info: Option<ContainerInspectResponse>,
     service_actors: Vec<Option<Addr<ServiceActor>>>,
+    stopped_notify: Option<Recipient<ContainerStopped>>,
 }
 
 impl ContainerActor {
@@ -36,7 +39,13 @@ impl ContainerActor {
             start_healthy,
             last_info: None,
             service_actors: vec![None; count],
+            stopped_notify: None,
         }
+    }
+
+    pub fn with_stopped_notify(mut self, recipient: Recipient<ContainerStopped>) -> Self {
+        self.stopped_notify = Some(recipient);
+        self
     }
 
     fn notify_consul(&mut self, status: ServiceHealth, info: &ContainerInspectResponse) {
@@ -192,6 +201,12 @@ impl Actor for ContainerActor {
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
         info!("Unregistered container {}.", self.container_id);
+
+        if let Some(recipient) = &self.stopped_notify {
+            recipient.do_send(ContainerStopped {
+                id: self.container_id.clone(),
+            });
+        }
     }
 }
 
