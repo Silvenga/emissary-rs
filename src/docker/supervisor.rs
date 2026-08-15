@@ -157,10 +157,21 @@ impl DockerSupervisor {
         );
     }
 
-    /// Removes a container from the tracked map if present.
-    /// Returns `true` if an entry was removed, `false` if it was already gone.
+    /// Removes a container from the tracked map only if its actor is no longer connected.
+    /// Returns `true` if an entry was removed, `false` if it was already gone or a fresh
+    /// actor has taken its place.
     fn remove_stale_container(&mut self, id: &ContainerId) -> bool {
-        self.containers.remove(id).is_some()
+        let stale = self
+            .containers
+            .get(id)
+            .map(|addr| !addr.connected())
+            .unwrap_or(false);
+
+        if stale {
+            self.containers.remove(id);
+        }
+
+        stale
     }
 
     fn reconcile_containers(&mut self, containers: Vec<ContainerSummary>, ctx: &mut Context<Self>) {
@@ -528,5 +539,62 @@ mod tests {
 
         assert!(!first);
         assert!(!second);
+    }
+
+    #[test]
+    fn when_removing_stale_container_with_dead_actor_then_should_return_true_and_remove() {
+        use crate::consul::ConsulClientBuilder;
+        use crate::docker::{ContainerActor, DockerClientBuilder};
+
+        actix::System::new().block_on(async {
+            let docker_client = DockerClientBuilder::new()
+                .with_host("http://localhost:2375")
+                .build()
+                .unwrap();
+            let consul_client = ConsulClientBuilder::new()
+                .with_address("http://localhost:8500")
+                .build()
+                .unwrap();
+            let id = make_id("abc123def456");
+
+            let addr =
+                ContainerActor::new(id.clone(), vec![], docker_client, consul_client, 15, false)
+                    .start();
+            addr.send(ContainerStop).await.unwrap();
+
+            let mut supervisor = make_supervisor();
+            supervisor.containers.insert(id.clone(), addr.clone());
+
+            assert!(supervisor.remove_stale_container(&id));
+            assert!(!supervisor.containers.contains_key(&id));
+        });
+    }
+
+    #[test]
+    fn when_removing_stale_container_with_live_actor_then_should_return_false_and_keep() {
+        use crate::consul::ConsulClientBuilder;
+        use crate::docker::{ContainerActor, DockerClientBuilder};
+
+        actix::System::new().block_on(async {
+            let docker_client = DockerClientBuilder::new()
+                .with_host("http://localhost:2375")
+                .build()
+                .unwrap();
+            let consul_client = ConsulClientBuilder::new()
+                .with_address("http://localhost:8500")
+                .build()
+                .unwrap();
+            let id = make_id("abc123def456");
+
+            let addr =
+                ContainerActor::new(id.clone(), vec![], docker_client, consul_client, 15, false)
+                    .start();
+
+            let mut supervisor = make_supervisor();
+            supervisor.containers.insert(id.clone(), addr);
+
+            assert!(!supervisor.remove_stale_container(&id));
+            assert!(supervisor.containers.contains_key(&id));
+        });
     }
 }
