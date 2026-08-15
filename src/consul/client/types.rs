@@ -109,3 +109,155 @@ pub struct AgentCheckUpdate {
     #[serde(rename = "Output")]
     pub output: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn when_serializing_check_status_then_it_should_use_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Passing).unwrap(),
+            "\"passing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Critical).unwrap(),
+            "\"critical\""
+        );
+    }
+
+    #[test]
+    fn when_deserializing_check_status_then_it_should_accept_lowercase() {
+        assert_eq!(
+            serde_json::from_str::<CheckStatus>("\"passing\"").unwrap(),
+            CheckStatus::Passing
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckStatus>("\"critical\"").unwrap(),
+            CheckStatus::Critical
+        );
+    }
+
+    #[test]
+    fn when_serializing_agent_service_registration_then_it_should_use_consul_pascalcase_keys() {
+        let registration = AgentServiceRegistration {
+            id: Some("web1".to_owned()),
+            name: "web".to_owned(),
+            tags: vec!["primary".to_owned()],
+            meta: HashMap::new(),
+            port: Some(8080),
+            check: None,
+            checks: vec![],
+        };
+
+        let json = serde_json::to_value(&registration).unwrap();
+
+        assert_eq!(json["ID"], "web1");
+        assert_eq!(json["Name"], "web");
+        assert_eq!(json["Tags"], serde_json::json!(["primary"]));
+        assert_eq!(json["Port"], 8080);
+    }
+
+    #[test]
+    fn when_serializing_agent_service_registration_with_default_then_optional_fields_should_be_null()
+     {
+        let registration = AgentServiceRegistration::default();
+
+        let json = serde_json::to_value(&registration).unwrap();
+
+        assert!(json["ID"].is_null());
+        assert!(json["Port"].is_null());
+        assert!(json["Check"].is_null());
+    }
+
+    #[test]
+    fn when_round_tripping_agent_service_registration_then_it_should_preserve_all_fields() {
+        let original = AgentServiceRegistration {
+            id: Some("api1".to_owned()),
+            name: "api".to_owned(),
+            tags: vec!["v2".to_owned(), "prod".to_owned()],
+            meta: {
+                let mut m = HashMap::new();
+                m.insert("version".to_owned(), "2".to_owned());
+                m
+            },
+            port: Some(443),
+            check: Some(AgentServiceCheck {
+                name: "health".to_owned(),
+                ttl: Some("45s".to_owned()),
+                deregister_critical_service_after: Some("90s".to_owned()),
+                status: Some(CheckStatus::Passing),
+                ..Default::default()
+            }),
+            checks: vec![],
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: AgentServiceRegistration = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.id, original.id);
+        assert_eq!(parsed.name, original.name);
+        assert_eq!(parsed.tags, original.tags);
+        assert_eq!(parsed.meta, original.meta);
+        assert_eq!(parsed.port, original.port);
+        assert_eq!(parsed.checks.len(), 0);
+
+        let parsed_check = parsed.check.unwrap();
+        assert_eq!(parsed_check.name, "health");
+        assert_eq!(parsed_check.ttl, Some("45s".to_owned()));
+        assert_eq!(
+            parsed_check.deregister_critical_service_after,
+            Some("90s".to_owned())
+        );
+        assert_eq!(parsed_check.status, Some(CheckStatus::Passing));
+    }
+
+    #[test]
+    fn when_serializing_agent_service_check_then_it_should_use_consul_pascalcase_keys() {
+        let check = AgentServiceCheck {
+            name: "Container Health".to_owned(),
+            ttl: Some("45s".to_owned()),
+            deregister_critical_service_after: Some("90s".to_owned()),
+            status: Some(CheckStatus::Critical),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&check).unwrap();
+
+        assert_eq!(json["Name"], "Container Health");
+        assert_eq!(json["TTL"], "45s");
+        assert_eq!(json["DeregisterCriticalServiceAfter"], "90s");
+        assert_eq!(json["Status"], "critical");
+    }
+
+    #[test]
+    fn when_serializing_agent_check_update_then_it_should_use_consul_pascalcase_keys() {
+        let update = AgentCheckUpdate {
+            status: CheckStatus::Passing,
+            output: "container healthy".to_owned(),
+        };
+
+        let json = serde_json::to_value(&update).unwrap();
+
+        assert_eq!(json["Status"], "passing");
+        assert_eq!(json["Output"], "container healthy");
+    }
+
+    #[test]
+    fn when_round_tripping_agent_check_update_then_it_should_preserve_status_and_output() {
+        let original = AgentCheckUpdate {
+            status: CheckStatus::Critical,
+            output: "connection refused".to_owned(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: AgentCheckUpdate = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.status, original.status);
+        assert_eq!(parsed.output, original.output);
+    }
+}

@@ -201,3 +201,71 @@ impl ConsulClientBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn when_building_with_default_then_it_should_succeed() {
+        let client = ConsulClientBuilder::new().build();
+
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn when_building_with_custom_address_then_it_should_succeed() {
+        let client = ConsulClientBuilder::new()
+            .with_address("http://consul.local:8500")
+            .build();
+
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn when_building_with_token_then_it_should_succeed() {
+        let client = ConsulClientBuilder::new()
+            .with_token(Some("secret-token".to_owned()))
+            .build();
+
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn when_building_with_custom_timeout_then_it_should_succeed() {
+        let client = ConsulClientBuilder::new()
+            .with_timeout(Duration::from_secs(10))
+            .build();
+
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn when_building_with_all_options_then_it_should_succeed() {
+        let client = ConsulClientBuilder::new()
+            .with_address("https://consul.local:8501")
+            .with_token(Some("token".to_owned()))
+            .with_timeout(Duration::from_secs(30))
+            .build();
+
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn when_building_with_invalid_token_chars_then_it_should_fail() {
+        let client = ConsulClientBuilder::new()
+            .with_token(Some("\u{0}bad".to_owned()))
+            .build();
+
+        assert!(client.is_err());
+    }
+
+    #[test]
+    fn when_building_default_then_address_should_be_localhost_8500() {
+        let builder = ConsulClientBuilder::default();
+
+        assert_eq!(builder.address, "http://localhost:8500");
+        assert!(builder.token.is_none());
+        assert_eq!(builder.timeout, Duration::from_secs(60));
+    }
+}
