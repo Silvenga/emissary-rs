@@ -1,7 +1,8 @@
 use crate::config::ConfigShared;
 use crate::consul::ConsulClient;
 use crate::docker::{
-    ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient, SupervisorShutdown,
+    ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient, ReconcileContainer,
+    SupervisorShutdown,
 };
 use crate::models::ContainerId;
 use crate::parsing::ServiceLabel;
@@ -13,6 +14,58 @@ use bollard::query_parameters::EventsOptions;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+/// What the supervisor should do for a container during anti-entropy reconciliation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReconcileAction {
+    /// Create a new [`ContainerActor`] for a container not yet tracked.
+    Create {
+        id: ContainerId,
+        services: Vec<ServiceLabel>,
+    },
+    /// Send [`ReconcileContainer`] to an already-tracked container's actor.
+    Reconcile(ContainerId),
+    /// Stop the actor for a container that no longer exists.
+    Remove(ContainerId),
+}
+
+/// Computes the [`ReconcileAction`]s needed to converge tracked containers with the
+/// containers discovered via the Docker API.
+pub fn compute_reconcile_actions(
+    discovered: &[(&str, &HashMap<String, String>)],
+    tracked: &HashSet<ContainerId>,
+) -> Vec<ReconcileAction> {
+    let mut actions = Vec::new();
+    let mut current_ids = HashSet::new();
+
+    for (raw_id, labels) in discovered {
+        let id: ContainerId = match (*raw_id).try_into() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        let services = ServiceLabel::from_labels(labels);
+        if services.is_empty() {
+            continue;
+        }
+
+        current_ids.insert(id.clone());
+
+        if tracked.contains(&id) {
+            actions.push(ReconcileAction::Reconcile(id));
+        } else {
+            actions.push(ReconcileAction::Create { id, services });
+        }
+    }
+
+    for id in tracked {
+        if !current_ids.contains(id) {
+            actions.push(ReconcileAction::Remove(id.clone()));
+        }
+    }
+
+    actions
+}
 
 pub struct DockerSupervisor {
     config: ConfigShared,
@@ -87,46 +140,44 @@ impl DockerSupervisor {
         _ctx: &mut Context<Self>,
     ) {
         debug!("Reconciling {} containers...", containers.len());
-        let mut current_ids = HashSet::new();
 
-        for container in containers {
-            let Ok(id): Result<ContainerId, _> = container.id.unwrap_or_default().try_into() else {
-                return;
-            };
-
-            if let Some(labels) = container.labels.as_ref() {
-                let services = ServiceLabel::from_labels(labels);
-
-                if !services.is_empty() {
-                    current_ids.insert(id.clone());
-                    self.containers.entry(id.clone()).or_insert_with(|| {
-                        info!("Reconciling container {}.", id);
-                        ContainerActor::new(
-                            id,
-                            services,
-                            self.docker_client.clone(),
-                            self.consul_client.clone(),
-                            self.config.consul_ttl_interval,
-                            self.config.consul_start_healthy,
-                        )
-                        .start()
-                    });
-                }
-            }
-        }
-
-        // Stop actors for containers that are gone
-        let gone_ids: Vec<_> = self
-            .containers
-            .keys()
-            .filter(|id| !current_ids.contains(id))
-            .cloned()
+        let discovered: Vec<(&str, &HashMap<String, String>)> = containers
+            .iter()
+            .filter_map(|c| {
+                let id = c.id.as_deref()?;
+                let labels = c.labels.as_ref()?;
+                Some((id, labels))
+            })
             .collect();
 
-        for id in gone_ids {
-            if let Some(addr) = self.containers.remove(&id) {
-                info!("Container gone: {}, stopping actor.", id);
-                addr.do_send(ContainerStop);
+        let tracked: HashSet<ContainerId> = self.containers.keys().cloned().collect();
+
+        for action in compute_reconcile_actions(&discovered, &tracked) {
+            match action {
+                ReconcileAction::Create { id, services } => {
+                    info!("Reconciling container {}.", id);
+                    let addr = ContainerActor::new(
+                        id.clone(),
+                        services,
+                        self.docker_client.clone(),
+                        self.consul_client.clone(),
+                        self.config.consul_ttl_interval,
+                        self.config.consul_start_healthy,
+                    )
+                    .start();
+                    self.containers.insert(id, addr);
+                }
+                ReconcileAction::Reconcile(id) => {
+                    if let Some(addr) = self.containers.get(&id) {
+                        addr.do_send(ReconcileContainer);
+                    }
+                }
+                ReconcileAction::Remove(id) => {
+                    if let Some(addr) = self.containers.remove(&id) {
+                        info!("Container gone: {}, stopping actor.", id);
+                        addr.do_send(ContainerStop);
+                    }
+                }
             }
         }
     }
@@ -247,5 +298,143 @@ impl StreamHandler<Result<EventMessage, bollard::errors::Error>> for DockerSuper
         warn!("Docker event stream finished. Triggering poll and attempting reconnection...");
         self.trigger_poll(ctx);
         self.subscribe_to_events(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels_with_service(name: &str, port: &str) -> HashMap<String, String> {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "com.silvenga.emissary.service".to_owned(),
+            format!("{};{}", name, port),
+        );
+        labels
+    }
+
+    fn empty_labels() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn make_id(s: &str) -> ContainerId {
+        ContainerId::try_from(s).unwrap()
+    }
+
+    #[test]
+    fn when_container_discovered_and_not_tracked_then_action_should_be_create() {
+        let labels = labels_with_service("web", "80");
+        let discovered = vec![("abc123", &labels)];
+        let tracked = HashSet::new();
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            ReconcileAction::Create { id, services } => {
+                assert_eq!(*id, make_id("abc123"));
+                assert_eq!(services.len(), 1);
+                assert_eq!(services[0].service_name, "web");
+            }
+            other => panic!("expected Create, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn when_container_discovered_and_tracked_then_action_should_be_reconcile() {
+        let labels = labels_with_service("web", "80");
+        let discovered = vec![("abc123", &labels)];
+        let mut tracked = HashSet::new();
+        tracked.insert(make_id("abc123"));
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert_eq!(actions, vec![ReconcileAction::Reconcile(make_id("abc123"))]);
+    }
+
+    #[test]
+    fn when_container_tracked_but_not_discovered_then_action_should_be_remove() {
+        let discovered: Vec<(&str, &HashMap<String, String>)> = vec![];
+        let mut tracked = HashSet::new();
+        tracked.insert(make_id("abc123"));
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert_eq!(actions, vec![ReconcileAction::Remove(make_id("abc123"))]);
+    }
+
+    #[test]
+    fn when_container_has_no_emissary_labels_then_no_action_for_it() {
+        let mut labels = HashMap::new();
+        labels.insert("com.docker.compose.project".to_owned(), "myapp".to_owned());
+        let discovered = vec![("abc123", &labels)];
+        let tracked = HashSet::new();
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn when_container_has_no_labels_then_no_action_for_it() {
+        let empty = empty_labels();
+        let discovered = vec![("abc123", &empty)];
+        let tracked = HashSet::new();
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn when_empty_id_then_no_action_for_it() {
+        let labels = labels_with_service("web", "80");
+        let discovered = vec![("", &labels)];
+        let tracked = HashSet::new();
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn when_mixed_scenario_then_actions_should_be_create_reconcile_and_remove() {
+        let labels_a = labels_with_service("web-a", "80");
+        let labels_c = labels_with_service("web-c", "8080");
+        let labels_gone = labels_with_service("web-gone", "9090");
+        let _ = labels_gone;
+
+        let discovered = vec![("aaa111", &labels_a), ("ccc333", &labels_c)];
+
+        let mut tracked = HashSet::new();
+        tracked.insert(make_id("aaa111"));
+        tracked.insert(make_id("bbb222"));
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        let has_reconcile_aaa = actions
+            .iter()
+            .any(|a| matches!(a, ReconcileAction::Reconcile(cid) if *cid == make_id("aaa111")));
+        let has_create_ccc = actions.iter().any(
+            |a| matches!(a, ReconcileAction::Create { id: cid, .. } if *cid == make_id("ccc333")),
+        );
+        let has_remove_bbb = actions
+            .iter()
+            .any(|a| matches!(a, ReconcileAction::Remove(cid) if *cid == make_id("bbb222")));
+
+        assert!(has_reconcile_aaa, "should reconcile aaa111: {:?}", actions);
+        assert!(has_create_ccc, "should create ccc333: {:?}", actions);
+        assert!(has_remove_bbb, "should remove bbb222: {:?}", actions);
+    }
+
+    #[test]
+    fn when_nothing_discovered_and_nothing_tracked_then_no_actions() {
+        let discovered: Vec<(&str, &HashMap<String, String>)> = vec![];
+        let tracked = HashSet::new();
+
+        let actions = compute_reconcile_actions(&discovered, &tracked);
+
+        assert!(actions.is_empty());
     }
 }

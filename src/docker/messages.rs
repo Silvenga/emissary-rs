@@ -14,3 +14,8 @@ pub struct ContainerStop;
 pub struct ContainerDockerEvent {
     pub event: EventMessage,
 }
+
+/// Sent by the supervisor's anti-entropy poll to re-inspect an already-tracked container.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct ReconcileContainer;
