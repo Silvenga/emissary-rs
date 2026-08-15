@@ -447,4 +447,19 @@ mod tests {
 
         assert!(actions.is_empty());
     }
+
+    #[test]
+    fn when_building_event_filters_then_it_should_subscribe_to_container_type_and_lifecycle_events()
+    {
+        let filters = build_event_filters();
+
+        assert_eq!(filters.get("type"), Some(&vec!["container".to_owned()]));
+        let events = filters.get("event").expect("event filter should exist");
+        assert!(events.contains(&"start".to_owned()));
+        assert!(events.contains(&"die".to_owned()));
+        assert!(events.contains(&"stop".to_owned()));
+        assert!(events.contains(&"destroy".to_owned()));
+        assert!(events.contains(&"health_status".to_owned()));
+        assert_eq!(events.len(), 5);
+    }
 }

@@ -67,4 +67,19 @@ mod tests {
         let expected = "    Container: 1234567890abcdef\n        Image: nginx:latest\n     Creation: 2021-07-01T00:00:00Z\n        State: healthy\n       Status: healthy";
         assert_eq!(payload, expected);
     }
+
+    #[test]
+    fn when_generating_service_id_then_it_should_combine_name_and_container_id() {
+        let instance = ServiceInstance {
+            name: "web".to_owned(),
+            container_id: "abc123def456".try_into().unwrap(),
+            port: 8080,
+            tags: vec![],
+            image: "nginx:latest".to_owned(),
+            created_at: "2021-07-01T00:00:00Z".to_owned(),
+            status: ServiceHealth::Healthy,
+        };
+
+        assert_eq!(instance.id(), "web_abc123def456");
+    }
 }
