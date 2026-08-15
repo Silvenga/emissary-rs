@@ -35,8 +35,7 @@ impl ConsulClient {
         self.execute_with_retry(|| async {
             let url = format!(
                 "{}/v1/agent/service/deregister/{}",
-                self.inner.address,
-                service_id
+                self.inner.address, service_id
             );
             let request = self.inner.client.put(url);
             self.send_and_validate(request).await
@@ -55,7 +54,11 @@ impl ConsulClient {
     }
 
     /// Updates a TTL check to the critical state.
-    pub async fn check_failure(&self, check_id: impl AsRef<str>, output: Option<&str>) -> Result<()> {
+    pub async fn check_failure(
+        &self,
+        check_id: impl AsRef<str>,
+        output: Option<&str>,
+    ) -> Result<()> {
         let check_id = check_id.as_ref();
         let payload = AgentCheckUpdate {
             status: CheckStatus::Critical,

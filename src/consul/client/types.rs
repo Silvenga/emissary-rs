@@ -35,7 +35,9 @@ pub struct AgentServiceRegistration {
 }
 
 /// Possible statuses for a health check.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default, EnumString, Display, AsRefStr)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default, EnumString, Display, AsRefStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum CheckStatus {
