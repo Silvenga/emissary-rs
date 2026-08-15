@@ -1,8 +1,8 @@
 use crate::config::ConfigShared;
 use crate::consul::ConsulClient;
 use crate::docker::{
-    ContainerActor, ContainerDockerEvent, ContainerStop, DockerClient, ReconcileContainer,
-    SupervisorShutdown,
+    ContainerActor, ContainerDockerEvent, ContainerStop, ContainerStopped, DockerClient,
+    ReconcileContainer, SupervisorShutdown,
 };
 use crate::models::ContainerId;
 use crate::parsing::ServiceLabel;
@@ -157,11 +157,21 @@ impl DockerSupervisor {
         );
     }
 
-    fn reconcile_containers(
-        &mut self,
-        containers: Vec<ContainerSummary>,
-        _ctx: &mut Context<Self>,
-    ) {
+    fn remove_stale_container(&mut self, id: &ContainerId) -> bool {
+        let stale = self
+            .containers
+            .get(id)
+            .map(|addr| !addr.connected())
+            .unwrap_or(false);
+
+        if stale {
+            self.containers.remove(id);
+        }
+
+        stale
+    }
+
+    fn reconcile_containers(&mut self, containers: Vec<ContainerSummary>, ctx: &mut Context<Self>) {
         debug!("Reconciling {} containers...", containers.len());
 
         let discovered: Vec<(&str, &HashMap<String, String>)> = containers
@@ -187,6 +197,7 @@ impl DockerSupervisor {
                         self.config.consul_ttl_interval,
                         self.config.consul_start_healthy,
                     )
+                    .with_stopped_notify(ctx.address().recipient())
                     .start();
                     self.containers.insert(id, addr);
                 }
@@ -205,7 +216,7 @@ impl DockerSupervisor {
         }
     }
 
-    fn process_event(&mut self, event: EventMessage, _ctx: &mut Context<Self>) {
+    fn process_event(&mut self, event: EventMessage, ctx: &mut Context<Self>) {
         let action = event.action.as_deref().unwrap_or_default();
         let actor = event.actor.as_ref();
         let Ok(id): Result<ContainerId, _> = actor
@@ -239,6 +250,7 @@ impl DockerSupervisor {
                         self.config.consul_ttl_interval,
                         self.config.consul_start_healthy,
                     )
+                    .with_stopped_notify(ctx.address().recipient())
                     .start();
                     self.containers.insert(id, actor_addr);
                 }
@@ -295,6 +307,19 @@ impl Handler<SupervisorShutdown> for DockerSupervisor {
     }
 }
 
+impl Handler<ContainerStopped> for DockerSupervisor {
+    type Result = ();
+
+    fn handle(&mut self, msg: ContainerStopped, _ctx: &mut Self::Context) -> Self::Result {
+        if self.remove_stale_container(&msg.id) {
+            debug!(
+                "Container {} self-stopped, removed stale entry from tracked map.",
+                msg.id
+            );
+        }
+    }
+}
+
 fn build_event_filters() -> HashMap<String, Vec<String>> {
     let mut filters = HashMap::new();
     filters.insert("type".to_owned(), vec!["container".to_owned()]);
@@ -314,6 +339,10 @@ fn build_event_filters() -> HashMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::consul::ConsulClientBuilder;
+    use crate::docker::{ContainerActor, DockerClientBuilder};
+    use std::sync::Arc;
 
     fn labels_with_service(name: &str, port: &str) -> HashMap<String, String> {
         let mut labels = HashMap::new();
@@ -461,5 +490,101 @@ mod tests {
         assert!(events.contains(&"destroy".to_owned()));
         assert!(events.contains(&"health_status".to_owned()));
         assert_eq!(events.len(), 5);
+    }
+
+    fn make_supervisor() -> DockerSupervisor {
+        let config = Arc::new(Config {
+            docker_host: "http://localhost:2375".to_owned(),
+            docker_timeout: 120,
+            consul_host: "http://localhost:8500".to_owned(),
+            consul_timeout: 3,
+            consul_token: None,
+            consul_datacenter: None,
+            consul_ttl_interval: 15,
+            consul_start_healthy: false,
+            polling_interval: 60,
+        });
+        let docker_client = DockerClientBuilder::new()
+            .with_host("http://localhost:2375")
+            .build()
+            .unwrap();
+        let consul_client = ConsulClientBuilder::new()
+            .with_address("http://localhost:8500")
+            .build()
+            .unwrap();
+
+        DockerSupervisor::new(config, docker_client, consul_client)
+    }
+
+    #[test]
+    fn when_removing_stale_container_not_in_map_then_should_return_false() {
+        let mut supervisor = make_supervisor();
+        let id = make_id("abc123def456");
+
+        assert!(!supervisor.remove_stale_container(&id));
+        assert!(supervisor.containers.is_empty());
+    }
+
+    #[test]
+    fn when_removing_stale_container_already_removed_then_should_return_false() {
+        let mut supervisor = make_supervisor();
+        let id = make_id("abc123def456");
+
+        let first = supervisor.remove_stale_container(&id);
+        let second = supervisor.remove_stale_container(&id);
+
+        assert!(!first);
+        assert!(!second);
+    }
+
+    #[test]
+    fn when_removing_stale_container_with_dead_actor_then_should_return_true_and_remove() {
+        actix::System::new().block_on(async {
+            let docker_client = DockerClientBuilder::new()
+                .with_host("http://localhost:2375")
+                .build()
+                .unwrap();
+            let consul_client = ConsulClientBuilder::new()
+                .with_address("http://localhost:8500")
+                .build()
+                .unwrap();
+            let id = make_id("abc123def456");
+
+            let addr =
+                ContainerActor::new(id.clone(), vec![], docker_client, consul_client, 15, false)
+                    .start();
+            addr.send(ContainerStop).await.unwrap();
+
+            let mut supervisor = make_supervisor();
+            supervisor.containers.insert(id.clone(), addr.clone());
+
+            assert!(supervisor.remove_stale_container(&id));
+            assert!(!supervisor.containers.contains_key(&id));
+        });
+    }
+
+    #[test]
+    fn when_removing_stale_container_with_live_actor_then_should_return_false_and_keep() {
+        actix::System::new().block_on(async {
+            let docker_client = DockerClientBuilder::new()
+                .with_host("http://localhost:2375")
+                .build()
+                .unwrap();
+            let consul_client = ConsulClientBuilder::new()
+                .with_address("http://localhost:8500")
+                .build()
+                .unwrap();
+            let id = make_id("abc123def456");
+
+            let addr =
+                ContainerActor::new(id.clone(), vec![], docker_client, consul_client, 15, false)
+                    .start();
+
+            let mut supervisor = make_supervisor();
+            supervisor.containers.insert(id.clone(), addr);
+
+            assert!(!supervisor.remove_stale_container(&id));
+            assert!(supervisor.containers.contains_key(&id));
+        });
     }
 }
