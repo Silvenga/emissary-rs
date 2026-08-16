@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/Silvenga/emissary-rs/compare/v0.1.1...v0.2.0) (2026-08-16)
+
+
+### Features
+
+* remove unused CONSUL_DATACENTER flag ([#43](https://github.com/Silvenga/emissary-rs/issues/43)) ([d9e8807](https://github.com/Silvenga/emissary-rs/commit/d9e8807b02ca1acd2a598e99ab3a083b1a4fdecf))
+
+
+### Bug Fixes
+
+* filter stopped containers in anti-entropy poll to prevent Consul re-registration oscillation ([#40](https://github.com/Silvenga/emissary-rs/issues/40)) ([54e9503](https://github.com/Silvenga/emissary-rs/commit/54e95030bfb72b5ce6adaa24880f8159e8ed3e72))
+* freeze health updates for paused containers to prevent Consul deregistration oscillation ([#44](https://github.com/Silvenga/emissary-rs/issues/44)) ([f1b8367](https://github.com/Silvenga/emissary-rs/commit/f1b836761100638e3efe82350fa39b5b0e5c8bf4))
+* handle Consul 429 Too Many Requests by retrying ([#42](https://github.com/Silvenga/emissary-rs/issues/42)) ([74b7a6f](https://github.com/Silvenga/emissary-rs/commit/74b7a6f704bc6fc029e4ed64e9af2ec4c5beb708))
+
 ## [0.1.1](https://github.com/Silvenga/emissary-rs/compare/v0.1.0...v0.1.1) (2026-08-16)
 
 
