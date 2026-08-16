@@ -127,8 +127,6 @@ impl ConsulClient {
     }
 }
 
-/// Maps an HTTP status code and body message to a `ConsulError`, treating
-/// 429 as `RateLimited` so it is retried via `is_transient`.
 fn classify_status_error(
     status: reqwest::StatusCode,
     retry_after_secs: Option<u64>,
