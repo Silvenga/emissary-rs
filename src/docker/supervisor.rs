@@ -354,6 +354,8 @@ fn build_event_filters() -> HashMap<String, Vec<String>> {
             "stop".to_owned(),
             "destroy".to_owned(),
             "health_status".to_owned(),
+            "pause".to_owned(),
+            "unpause".to_owned(),
         ],
     );
     filters
@@ -564,7 +566,9 @@ mod tests {
         assert!(events.contains(&"stop".to_owned()));
         assert!(events.contains(&"destroy".to_owned()));
         assert!(events.contains(&"health_status".to_owned()));
-        assert_eq!(events.len(), 5);
+        assert!(events.contains(&"pause".to_owned()));
+        assert!(events.contains(&"unpause".to_owned()));
+        assert_eq!(events.len(), 7);
     }
 
     fn make_supervisor() -> DockerSupervisor {
