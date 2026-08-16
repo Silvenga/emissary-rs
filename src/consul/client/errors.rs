@@ -15,7 +15,6 @@ pub enum ConsulError {
     Other(String),
 
     #[error("Invalid configuration: {0}")]
-    #[allow(dead_code)]
     InvalidConfiguration(String),
 }
 
