@@ -113,21 +113,41 @@ impl ConsulClient {
 
     async fn handle_error(&self, response: reqwest::Response) -> ConsulError {
         let status = response.status();
+        let retry_after_secs = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
         let message = response
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_owned());
 
-        if status == reqwest::StatusCode::NOT_FOUND {
-            ConsulError::NotFound(message)
-        } else if status.is_server_error() {
-            ConsulError::ServerError {
-                status: status.as_u16(),
-                message,
-            }
-        } else {
-            ConsulError::Other(format!("Status {}: {}", status, message))
+        classify_status_error(status, retry_after_secs, message)
+    }
+}
+
+/// Maps an HTTP status code and body message to a `ConsulError`, treating
+/// 429 as `RateLimited` so it is retried via `is_transient`.
+fn classify_status_error(
+    status: reqwest::StatusCode,
+    retry_after_secs: Option<u64>,
+    message: String,
+) -> ConsulError {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        ConsulError::RateLimited {
+            retry_after_secs,
+            message,
         }
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        ConsulError::NotFound(message)
+    } else if status.is_server_error() {
+        ConsulError::ServerError {
+            status: status.as_u16(),
+            message,
+        }
+    } else {
+        ConsulError::Other(format!("Status {}: {}", status, message))
     }
 }
 
@@ -364,5 +384,70 @@ mod tests {
         let result = build_path_url("not-a-url", "/v1/agent/service/deregister/", "web");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_classifying_429_then_it_should_be_rate_limited_with_retry_after() {
+        let err = classify_status_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some(60),
+            "Too Many Requests".to_owned(),
+        );
+
+        assert!(matches!(
+            err,
+            ConsulError::RateLimited {
+                retry_after_secs: Some(60),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn when_classifying_429_without_retry_after_then_it_should_be_rate_limited() {
+        let err = classify_status_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            None,
+            "Too Many Requests".to_owned(),
+        );
+
+        assert!(matches!(
+            err,
+            ConsulError::RateLimited {
+                retry_after_secs: None,
+                ..
+            }
+        ));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn when_classifying_404_then_it_should_be_not_found() {
+        let err =
+            classify_status_error(reqwest::StatusCode::NOT_FOUND, None, "Not Found".to_owned());
+
+        assert!(matches!(err, ConsulError::NotFound(_)));
+    }
+
+    #[test]
+    fn when_classifying_503_then_it_should_be_server_error() {
+        let err = classify_status_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            None,
+            "Service Unavailable".to_owned(),
+        );
+
+        assert!(matches!(err, ConsulError::ServerError { status: 503, .. }));
+    }
+
+    #[test]
+    fn when_classifying_400_then_it_should_be_other() {
+        let err = classify_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            None,
+            "Bad Request".to_owned(),
+        );
+
+        assert!(matches!(err, ConsulError::Other(_)));
     }
 }
