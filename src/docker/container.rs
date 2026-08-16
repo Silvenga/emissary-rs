@@ -5,6 +5,7 @@ use crate::docker::{
 use crate::models::{ContainerId, ServiceHealth, ServiceInstance};
 use crate::parsing::ServiceLabel;
 use actix::prelude::*;
+use bollard::config::ContainerStateStatusEnum;
 use bollard::models::ContainerInspectResponse;
 use tracing::{debug, info, warn};
 
@@ -18,6 +19,7 @@ pub struct ContainerActor {
     last_info: Option<ContainerInspectResponse>,
     service_actors: Vec<Option<Addr<ServiceActor>>>,
     stopped_notify: Option<Recipient<ContainerStopped>>,
+    paused: bool,
 }
 
 impl ContainerActor {
@@ -40,6 +42,7 @@ impl ContainerActor {
             last_info: None,
             service_actors: vec![None; count],
             stopped_notify: None,
+            paused: false,
         }
     }
 
@@ -110,6 +113,28 @@ impl ContainerActor {
     }
 
     fn handle_inspection(&mut self, info: ContainerInspectResponse, _ctx: &mut Context<Self>) {
+        let docker_status = info.state.as_ref().and_then(|s| s.status);
+
+        if docker_status == Some(ContainerStateStatusEnum::PAUSED) {
+            if !self.paused {
+                info!(
+                    "Container {} is paused, freezing health updates at last known status.",
+                    self.container_id
+                );
+            }
+            self.paused = true;
+            self.last_info = Some(info);
+            return;
+        }
+
+        if self.paused {
+            info!(
+                "Container {} is no longer paused (detected via inspection), resuming health updates.",
+                self.container_id
+            );
+            self.paused = false;
+        }
+
         let status = match info.state.as_ref() {
             Some(state) => ServiceHealth::from_docker_state(
                 state.status,
@@ -171,6 +196,10 @@ pub enum DockerEventAction {
     Reinspect,
     /// Update service health from the event's health-status string.
     UpdateHealth(ServiceHealth),
+    /// Container was paused - freeze health updates at the last known status.
+    Pause,
+    /// Container was unpaused - re-inspect and resume normal health updates.
+    Unpause,
     /// No action needed - lifecycle teardown is handled by the supervisor.
     Ignore,
 }
@@ -179,6 +208,10 @@ pub enum DockerEventAction {
 pub fn resolve_event_action(action: &str) -> DockerEventAction {
     if action == "start" {
         DockerEventAction::Reinspect
+    } else if action == "pause" {
+        DockerEventAction::Pause
+    } else if action == "unpause" {
+        DockerEventAction::Unpause
     } else if action.starts_with("health_status") {
         DockerEventAction::UpdateHealth(ServiceHealth::parse(action))
     } else {
@@ -246,8 +279,34 @@ impl Handler<ContainerDockerEvent> for ContainerActor {
                 self.trigger_inspection(ctx);
             }
             DockerEventAction::UpdateHealth(status) => {
-                for addr in self.service_actors.iter().flatten() {
-                    addr.do_send(ServiceHealthChanged { status });
+                if !self.paused {
+                    for addr in self.service_actors.iter().flatten() {
+                        addr.do_send(ServiceHealthChanged { status });
+                    }
+                } else {
+                    debug!(
+                        "Container {} is paused, suppressing health update {:?}.",
+                        self.container_id, status
+                    );
+                }
+            }
+            DockerEventAction::Pause => {
+                if !self.paused {
+                    self.paused = true;
+                    info!(
+                        "Container {} paused, freezing health updates.",
+                        self.container_id
+                    );
+                }
+            }
+            DockerEventAction::Unpause => {
+                if self.paused {
+                    self.paused = false;
+                    info!(
+                        "Container {} unpaused, resuming health updates.",
+                        self.container_id
+                    );
+                    self.trigger_inspection(ctx);
                 }
             }
             DockerEventAction::Ignore => {}
@@ -313,6 +372,16 @@ mod tests {
     #[test]
     fn when_event_action_is_destroy_then_action_should_be_ignore() {
         assert_eq!(resolve_event_action("destroy"), DockerEventAction::Ignore);
+    }
+
+    #[test]
+    fn when_event_action_is_pause_then_action_should_be_pause() {
+        assert_eq!(resolve_event_action("pause"), DockerEventAction::Pause);
+    }
+
+    #[test]
+    fn when_event_action_is_unpause_then_action_should_be_unpause() {
+        assert_eq!(resolve_event_action("unpause"), DockerEventAction::Unpause);
     }
 
     #[test]
