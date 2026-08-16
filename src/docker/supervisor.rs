@@ -10,7 +10,7 @@ use actix::fut::{ActorFutureExt, ActorStreamExt, WrapFuture, WrapStream};
 use actix::prelude::*;
 use backoff::backoff::Backoff;
 use backoff::exponential::ExponentialBackoff;
-use bollard::models::{ContainerSummary, EventMessage};
+use bollard::models::{ContainerSummary, ContainerSummaryStateEnum, EventMessage};
 use bollard::query_parameters::EventsOptions;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -66,6 +66,26 @@ pub fn compute_reconcile_actions(
     }
 
     actions
+}
+
+/// Whether a container state is active enough to warrant registration in Consul.
+///
+/// Stopped containers still carry emissary labels, so the anti-entropy poll
+/// would re-register them as critical every cycle. Filtering them out breaks
+/// the register -> deregister -> re-register oscillation.
+pub fn is_active_state(state: Option<&ContainerSummaryStateEnum>) -> bool {
+    match state {
+        Some(ContainerSummaryStateEnum::RUNNING)
+        | Some(ContainerSummaryStateEnum::PAUSED)
+        | Some(ContainerSummaryStateEnum::RESTARTING)
+        | Some(ContainerSummaryStateEnum::CREATED)
+        | Some(ContainerSummaryStateEnum::STOPPING) => true,
+        Some(ContainerSummaryStateEnum::EXITED)
+        | Some(ContainerSummaryStateEnum::DEAD)
+        | Some(ContainerSummaryStateEnum::REMOVING)
+        | Some(ContainerSummaryStateEnum::EMPTY)
+        | None => false,
+    }
 }
 
 pub struct DockerSupervisor {
@@ -179,6 +199,9 @@ impl DockerSupervisor {
             .filter_map(|c| {
                 let id = c.id.as_deref()?;
                 let labels = c.labels.as_ref()?;
+                if !is_active_state(c.state.as_ref()) {
+                    return None;
+                }
                 Some((id, labels))
             })
             .collect();
@@ -475,6 +498,58 @@ mod tests {
         let actions = compute_reconcile_actions(&discovered, &tracked);
 
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn when_state_is_running_then_is_active_state_should_be_true() {
+        assert!(is_active_state(Some(&ContainerSummaryStateEnum::RUNNING)));
+    }
+
+    #[test]
+    fn when_state_is_paused_then_is_active_state_should_be_true() {
+        assert!(is_active_state(Some(&ContainerSummaryStateEnum::PAUSED)));
+    }
+
+    #[test]
+    fn when_state_is_restarting_then_is_active_state_should_be_true() {
+        assert!(is_active_state(Some(
+            &ContainerSummaryStateEnum::RESTARTING
+        )));
+    }
+
+    #[test]
+    fn when_state_is_created_then_is_active_state_should_be_true() {
+        assert!(is_active_state(Some(&ContainerSummaryStateEnum::CREATED)));
+    }
+
+    #[test]
+    fn when_state_is_stopping_then_is_active_state_should_be_true() {
+        assert!(is_active_state(Some(&ContainerSummaryStateEnum::STOPPING)));
+    }
+
+    #[test]
+    fn when_state_is_exited_then_is_active_state_should_be_false() {
+        assert!(!is_active_state(Some(&ContainerSummaryStateEnum::EXITED)));
+    }
+
+    #[test]
+    fn when_state_is_dead_then_is_active_state_should_be_false() {
+        assert!(!is_active_state(Some(&ContainerSummaryStateEnum::DEAD)));
+    }
+
+    #[test]
+    fn when_state_is_removing_then_is_active_state_should_be_false() {
+        assert!(!is_active_state(Some(&ContainerSummaryStateEnum::REMOVING)));
+    }
+
+    #[test]
+    fn when_state_is_empty_then_is_active_state_should_be_false() {
+        assert!(!is_active_state(Some(&ContainerSummaryStateEnum::EMPTY)));
+    }
+
+    #[test]
+    fn when_state_is_none_then_is_active_state_should_be_false() {
+        assert!(!is_active_state(None));
     }
 
     #[test]
