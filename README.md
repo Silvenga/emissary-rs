@@ -50,8 +50,6 @@ Options:
           Timeout for Consul API requests in seconds [env: CONSUL_TIMEOUT=] [default: 3]
       --consul-token <CONSUL_TOKEN>
           Consul ACL token [env: CONSUL_TOKEN=]
-      --consul-datacenter <CONSUL_DATACENTER>
-          Consul datacenter [env: CONSUL_DATACENTER=]
       --consul-ttl-interval <CONSUL_TTL_INTERVAL>
           Consul TTL interval in seconds [env: CONSUL_TTL_INTERVAL=] [default: 15]
       --consul-start-healthy

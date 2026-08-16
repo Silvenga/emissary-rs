@@ -38,10 +38,6 @@ pub struct Config {
     #[arg(long, env = "CONSUL_TOKEN")]
     pub consul_token: Option<String>,
 
-    /// Consul datacenter.
-    #[arg(long, env = "CONSUL_DATACENTER")]
-    pub consul_datacenter: Option<String>,
-
     /// Consul TTL interval in seconds.
     #[arg(
         long,
@@ -80,7 +76,6 @@ impl std::fmt::Debug for Config {
             .field("consul_host", &self.consul_host)
             .field("consul_timeout", &self.consul_timeout)
             .field("consul_token", &self.consul_token.as_ref().map(|_| "***"))
-            .field("consul_datacenter", &self.consul_datacenter)
             .field("consul_ttl_interval", &self.consul_ttl_interval)
             .field("consul_start_healthy", &self.consul_start_healthy)
             .field("polling_interval", &self.polling_interval)
@@ -138,7 +133,6 @@ mod tests {
             consul_host: "consul".to_owned(),
             consul_timeout: 60,
             consul_token: Some("secret".to_owned()),
-            consul_datacenter: None,
             consul_ttl_interval: 15,
             consul_start_healthy: false,
             polling_interval: 60,

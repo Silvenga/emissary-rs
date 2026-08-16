@@ -574,7 +574,6 @@ mod tests {
             consul_host: "http://localhost:8500".to_owned(),
             consul_timeout: 3,
             consul_token: None,
-            consul_datacenter: None,
             consul_ttl_interval: 15,
             consul_start_healthy: false,
             polling_interval: 60,
