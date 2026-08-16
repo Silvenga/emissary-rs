@@ -43,7 +43,12 @@ pub struct Config {
     pub consul_datacenter: Option<String>,
 
     /// Consul TTL interval in seconds.
-    #[arg(long, env = "CONSUL_TTL_INTERVAL", default_value = "15")]
+    #[arg(
+        long,
+        env = "CONSUL_TTL_INTERVAL",
+        default_value = "15",
+        value_parser = validate_positive_duration("CONSUL_TTL_INTERVAL")
+    )]
     pub consul_ttl_interval: u64,
 
     /// Whether a container in 'starting' state should be considered healthy.
@@ -51,7 +56,12 @@ pub struct Config {
     pub consul_start_healthy: bool,
 
     /// Polling interval in seconds.
-    #[arg(long, env = "POLLING_INTERVAL", default_value = "60")]
+    #[arg(
+        long,
+        env = "POLLING_INTERVAL",
+        default_value = "60",
+        value_parser = validate_positive_duration("POLLING_INTERVAL")
+    )]
     pub polling_interval: u64,
 }
 
@@ -99,6 +109,20 @@ fn validate_consul_host(s: &str) -> Result<String, String> {
             "Unsupported CONSUL_HOST scheme: {}. Supported: http, https",
             url.scheme()
         )),
+    }
+}
+
+fn validate_positive_duration(
+    field: &'static str,
+) -> impl Fn(&str) -> Result<u64, String> + Clone + Send + Sync + 'static {
+    move |s| {
+        let value: u64 = s
+            .parse()
+            .map_err(|e| format!("Invalid value for {}: {}. Error: {}", field, s, e))?;
+        if value == 0 {
+            return Err(format!("{} must be greater than 0, got 0.", field));
+        }
+        Ok(value)
     }
 }
 
@@ -195,5 +219,44 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid URL"));
+    }
+
+    #[test]
+    fn when_parsing_zero_ttl_then_it_should_fail() {
+        let result = Config::try_parse_from(["emissary", "--consul-ttl-interval", "0"]);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CONSUL_TTL_INTERVAL must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn when_parsing_zero_polling_interval_then_it_should_fail() {
+        let result = Config::try_parse_from(["emissary", "--polling-interval", "0"]);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("POLLING_INTERVAL must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn when_parsing_non_numeric_ttl_then_it_should_fail() {
+        let result = Config::try_parse_from(["emissary", "--consul-ttl-interval", "abc"]);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid value for CONSUL_TTL_INTERVAL")
+        );
     }
 }
