@@ -33,10 +33,11 @@ impl ConsulClient {
     pub async fn deregister_service(&self, service_id: impl AsRef<str>) -> Result<()> {
         let service_id = service_id.as_ref();
         self.execute_with_retry(|| async {
-            let url = format!(
-                "{}/v1/agent/service/deregister/{}",
-                self.inner.address, service_id
-            );
+            let url = build_path_url(
+                &self.inner.address,
+                "/v1/agent/service/deregister/",
+                service_id,
+            )?;
             let request = self.inner.client.put(url);
             self.send_and_validate(request).await
         })
@@ -75,7 +76,7 @@ impl ConsulClient {
     ) -> Result<()> {
         let check_id = check_id.as_ref();
         self.execute_with_retry(|| async {
-            let url = format!("{}/v1/agent/check/update/{}", self.inner.address, check_id);
+            let url = build_path_url(&self.inner.address, "/v1/agent/check/update/", check_id)?;
             let request = self.inner.client.put(url).json(payload);
             self.send_and_validate(request).await
         })
@@ -128,6 +129,20 @@ impl ConsulClient {
             ConsulError::Other(format!("Status {}: {}", status, message))
         }
     }
+}
+
+/// Builds a URL by appending a percent-encoded path segment to a base address.
+fn build_path_url(address: &str, prefix: &str, segment: &str) -> Result<String> {
+    let mut url = url::Url::parse(address)
+        .map_err(|e| ConsulError::InvalidConfiguration(format!("Invalid consul address: {e}")))?
+        .join(prefix.trim_start_matches('/').trim_end_matches('/'))
+        .map_err(|e| ConsulError::InvalidConfiguration(format!("Invalid consul path: {e}")))?;
+    url.path_segments_mut()
+        .map_err(|_| {
+            ConsulError::InvalidConfiguration("consul URL must support path segments".to_owned())
+        })?
+        .push(segment);
+    Ok(url.to_string())
 }
 
 /// A builder for the ConsulClient.
@@ -267,5 +282,87 @@ mod tests {
         assert_eq!(builder.address, "http://localhost:8500");
         assert!(builder.token.is_none());
         assert_eq!(builder.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn when_building_deregister_url_then_service_id_should_be_url_encoded() {
+        let url = build_path_url(
+            "http://localhost:8500",
+            "/v1/agent/service/deregister/",
+            "web#evil",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://localhost:8500/v1/agent/service/deregister/web%23evil"
+        );
+    }
+
+    #[test]
+    fn when_building_deregister_url_with_question_mark_then_it_should_be_url_encoded() {
+        let url = build_path_url(
+            "http://localhost:8500",
+            "/v1/agent/service/deregister/",
+            "web?evil",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://localhost:8500/v1/agent/service/deregister/web%3Fevil"
+        );
+    }
+
+    #[test]
+    fn when_building_deregister_url_with_slash_then_it_should_be_url_encoded() {
+        let url = build_path_url(
+            "http://localhost:8500",
+            "/v1/agent/service/deregister/",
+            "web/evil",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://localhost:8500/v1/agent/service/deregister/web%2Fevil"
+        );
+    }
+
+    #[test]
+    fn when_building_deregister_url_with_safe_id_then_it_should_not_be_encoded() {
+        let url = build_path_url(
+            "http://localhost:8500",
+            "/v1/agent/service/deregister/",
+            "web_abc123",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://localhost:8500/v1/agent/service/deregister/web_abc123"
+        );
+    }
+
+    #[test]
+    fn when_building_check_update_url_then_check_id_should_be_url_encoded() {
+        let url = build_path_url(
+            "http://localhost:8500",
+            "/v1/agent/check/update/",
+            "service:web#evil",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://localhost:8500/v1/agent/check/update/service:web%23evil"
+        );
+    }
+
+    #[test]
+    fn when_building_url_with_invalid_address_then_it_should_fail() {
+        let result = build_path_url("not-a-url", "/v1/agent/service/deregister/", "web");
+
+        assert!(result.is_err());
     }
 }

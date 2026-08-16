@@ -3,9 +3,10 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{char, digit1},
-    combinator::{map, map_res},
+    combinator::{eof, map, map_res},
     multi::many0,
 };
+use tracing::warn;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ServiceLabel {
@@ -25,7 +26,16 @@ impl ServiceLabel {
         labels
             .iter()
             .filter(|(k, _)| Self::is_emissary_label(k))
-            .filter_map(|(_, v)| Self::parse(v).ok().map(|(_, sl)| sl))
+            .filter_map(|(k, v)| match Self::parse(v) {
+                Ok((_, sl)) => Some(sl),
+                Err(_) => {
+                    warn!(
+                        "Skipping invalid service label on key '{}': value '{}' is malformed.",
+                        k, v
+                    );
+                    None
+                }
+            })
             .collect()
     }
 
@@ -34,6 +44,7 @@ impl ServiceLabel {
     pub fn parse(input: &str) -> IResult<&str, Self> {
         let (input, service_name) = parse_name(input)?;
         let (input, components) = many0(parse_component).parse(input)?;
+        let (input, _) = eof(input)?;
 
         let mut port = None;
         let mut tags = Vec::new();
@@ -64,11 +75,14 @@ fn separator(input: &str) -> IResult<&str, char> {
     alt((char(';'), char('.'))).parse(input)
 }
 
+fn is_dns_safe(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
 fn parse_name(input: &str) -> IResult<&str, String> {
-    map(
-        nom::bytes::complete::take_while1(|c: char| !is_separator(c)),
-        |s: &str| s.to_owned(),
-    )
+    map(nom::bytes::complete::take_while1(is_dns_safe), |s: &str| {
+        s.to_owned()
+    })
     .parse(input)
 }
 
@@ -181,5 +195,125 @@ mod tests {
         assert_eq!(services.len(), 2);
         assert!(services.iter().any(|s| s.service_name == "web"));
         assert!(services.iter().any(|s| s.service_name == "api"));
+    }
+
+    #[test]
+    fn when_parsing_label_with_trailing_garbage_then_it_should_fail() {
+        let input = "web;80;garbage";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_trailing_garbage_after_tags_then_it_should_fail() {
+        let input = "web;80;tags=a,b;garbage";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_url_path_injection_hash_then_it_should_fail() {
+        let input = "web#evil;80";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_url_path_injection_question_then_it_should_fail() {
+        let input = "web?evil;80";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_space_in_name_then_it_should_fail() {
+        let input = "web site;80";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_underscore_in_name_then_it_should_fail() {
+        let input = "my_service;80";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_hyphen_in_name_then_it_should_succeed() {
+        let input = "my-service;80";
+
+        let (_, config) = ServiceLabel::parse(input).unwrap();
+
+        assert_eq!(config.service_name, "my-service");
+        assert_eq!(config.port, Some(80));
+    }
+
+    #[test]
+    fn when_parsing_label_with_empty_name_then_it_should_fail() {
+        let input = ";80";
+
+        let result = ServiceLabel::parse(input);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_parsing_label_with_dot_in_name_then_it_should_treat_dot_as_separator() {
+        let input = "web.8080";
+
+        let (_, config) = ServiceLabel::parse(input).unwrap();
+
+        assert_eq!(config.service_name, "web");
+        assert_eq!(config.port, Some(8080));
+    }
+
+    #[test]
+    fn when_parsing_label_with_uppercase_in_name_then_it_should_succeed() {
+        let input = "MyService;80";
+
+        let (_, config) = ServiceLabel::parse(input).unwrap();
+
+        assert_eq!(config.service_name, "MyService");
+    }
+
+    #[test]
+    fn when_parsing_label_with_digits_in_name_then_it_should_succeed() {
+        let input = "web123;80";
+
+        let (_, config) = ServiceLabel::parse(input).unwrap();
+
+        assert_eq!(config.service_name, "web123");
+    }
+
+    #[test]
+    fn when_from_labels_receives_invalid_label_then_it_should_drop_it() {
+        use std::collections::HashMap;
+        let mut labels = HashMap::new();
+        labels.insert(
+            "com.silvenga.emissary.service.web".to_owned(),
+            "web;80".to_owned(),
+        );
+        labels.insert(
+            "com.silvenga.emissary.service.bad".to_owned(),
+            "my_service;80".to_owned(),
+        );
+
+        let services = ServiceLabel::from_labels(&labels);
+
+        assert_eq!(services.len(), 1);
+        assert!(services.iter().any(|s| s.service_name == "web"));
     }
 }
